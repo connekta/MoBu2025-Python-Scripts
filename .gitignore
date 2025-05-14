@@ -1,0 +1,33 @@
+# Claude settings
+**/.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*~
+*.swp
+*.swo
+
+# MotionBuilder specific
+*.fbx.meta
