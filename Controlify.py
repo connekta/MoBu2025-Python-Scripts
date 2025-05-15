@@ -13,10 +13,10 @@ try:
     from pyfbsdk import *
     from pyfbsdk_additions import *
     MOBU_AVAILABLE = True
-    print("MotionBuilder SDK loaded successfully")
+    # print("MotionBuilder SDK loaded successfully")
 except ImportError:
     MOBU_AVAILABLE = False
-    print("Warning: pyfbsdk not found. Running in development mode.")
+    # print("Warning: pyfbsdk not found. Running in development mode.")
 
 # Import PySide6 modules
 try:
@@ -28,9 +28,9 @@ try:
     )
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QColor
-    print("PySide6 modules imported successfully")
+    # print("PySide6 modules imported successfully")
 except ImportError as e:
-    print(f"Error importing PySide6: {str(e)}")
+    # print(f"Error importing PySide6: {str(e)}")
     # Try to give helpful error message about PySide6 installation
     raise ImportError("PySide6 is required. Please install it in MotionBuilder's Python environment.") from e
 
@@ -156,6 +156,9 @@ class ControlifyDialog(QDialog):
         # Connect closeEvent to clean up previews
         self.destroyed.connect(self.cleanup_previews)
         
+        # Track current selection to avoid unnecessary updates
+        self.last_selection = []
+        
         # Start preview immediately since it's on by default
         if self.preview_enabled:
             self.toggle_preview(True)
@@ -171,7 +174,7 @@ class ControlifyDialog(QDialog):
             for component in scene.Components:
                 if component.Name == folder_name and component.ClassName() == "FBFolder":
                     found_folder = component
-                    print(f"Found existing folder: {folder_name}")
+                    # print(f"Found existing folder: {folder_name}")
                     break
             
             # If folder doesn't exist, create it
@@ -186,16 +189,17 @@ class ControlifyDialog(QDialog):
                 if constraints_component:
                     # Create the folder with a reference to the Constraints component to make it appear in that category
                     found_folder = FBFolder(folder_name, constraints_component)
-                    print(f"Created new folder: {folder_name}")
+                    # print(f"Created new folder: {folder_name}")
                 else:
-                    print("Could not find Constraints component in scene")
+                    pass  # Could not find Constraints component in scene
             
             # Store reference to the folder
             self.custom_folder = found_folder
             
         except Exception as e:
-            print(f"Error creating custom folder: {str(e)}")
-            traceback.print_exc()
+            # print(f"Error creating custom folder: {str(e)}")
+            # traceback.print_exc()
+            pass
             self.custom_folder = None
     
     def create_constraint_group(self, parent_layout):
@@ -595,11 +599,11 @@ class ControlifyDialog(QDialog):
                         # This is a position constraint on the offset parent for rotation controls
                         pass  # Don't count this as a position constraint on the model itself
             
-            # Debug print to check what we found
-            print(f"\nChecking constraints for model {model.Name}:")
-            print(f"  Current radio selection: {current_constraint_type}")
-            print(f"  Constraints found: {constraints_found}")
-            print(f"  Has Parent: {has_parent}, Has Position: {has_position}, Has Rotation: {has_rotation}")
+            # Debug logging commented out to reduce log spam
+            # print(f"\nChecking constraints for model {model.Name}:")
+            # print(f"  Current radio selection: {current_constraint_type}")
+            # print(f"  Constraints found: {constraints_found}")
+            # print(f"  Has Parent: {has_parent}, Has Position: {has_position}, Has Rotation: {has_rotation}")
             
             # RULE 1: If has parent constraint, disable ALL preview
             if has_parent:
@@ -689,6 +693,9 @@ class ControlifyDialog(QDialog):
         # If no valid objects found, clean up
         if valid_objects_count == 0:
             self.cleanup_previews()
+        
+        # Update last selection to prevent recreating on next update
+        self.last_selection = [model.Name for model in selected_models]
     
     def update_preview_markers(self):
         """Update existing preview markers with current settings"""
@@ -699,9 +706,13 @@ class ControlifyDialog(QDialog):
         selected_models = FBModelList()
         FBGetSelectedModels(selected_models)
         
+        # Create a list of selected model names for comparison
+        current_selection = [model.Name for model in selected_models]
+        
         # If selection is a single marker, don't show preview
         if len(selected_models) == 1 and selected_models[0].ClassName() == "FBModelMarker":
             self.cleanup_previews()
+            self.last_selection = current_selection
             return
             
         # Check if selected models are valid for preview
@@ -715,10 +726,18 @@ class ControlifyDialog(QDialog):
                     continue
             valid_model_count += 1
         
-        # If selection count has changed or no valid objects, recreate or clean up
+        # Check if selection has actually changed
+        if current_selection != self.last_selection:
+            # Selection changed, recreate preview markers
+            self.create_preview_markers()
+            self.last_selection = current_selection
+            return
+        
+        # If preview markers count doesn't match valid objects, recreate
         # Note: We now have 3 previews per model (marker + offset null + offset parent)
         if valid_model_count * 3 != len(self.preview_markers):
             self.create_preview_markers()
+            self.last_selection = current_selection
             return
             
         # Update offset values
@@ -798,7 +817,7 @@ class ControlifyDialog(QDialog):
                 try:
                     obj.FBDelete()
                 except:
-                    print(f"Failed to delete object directly: {obj.Name if hasattr(obj, 'Name') else 'Unknown'}")
+                    pass  # Failed to delete object directly
         
         # Clear our internal list
         self.preview_markers.clear()
@@ -1013,7 +1032,7 @@ class ControlifyDialog(QDialog):
         existing_parent_control = None
         for component in FBSystem().Scene.Components:
             if component.Name == parent_control_name and component.ClassName() == "FBModelNull":
-                print(f"Found existing parent control: {parent_control_name}")
+                # print(f"Found existing parent control: {parent_control_name}")
                 existing_parent_control = component
                 break
         
@@ -1021,7 +1040,7 @@ class ControlifyDialog(QDialog):
             return existing_parent_control
         
         # Create new parent control
-        print(f"Creating new parent control: {parent_control_name}")
+        # print(f"Creating new parent control: {parent_control_name}")
         parent_control = FBModelNull(parent_control_name)
         parent_control.Show = True
         
@@ -1169,15 +1188,20 @@ class ControlifyDialog(QDialog):
         try:
             if self.custom_folder:
                 self.custom_folder.ConnectSrc(constraint)
-                print(f"Added constraint {constraint.Name} to custom folder")
+                # print(f"Added constraint {constraint.Name} to custom folder")
             else:
-                print("No custom folder available")
+                pass  # No custom folder available
         except Exception as e:
-            print(f"Error adding constraint to folder: {str(e)}")
-            traceback.print_exc()
+            # print(f"Error adding constraint to folder: {str(e)}")
+            # traceback.print_exc()
+            pass
     
     def create_constraint(self, constraint_type, source, target, model_name, use_snap=True):
-        """Create a constraint between two objects"""
+        """Create a constraint between two objects
+        
+        The constraint will be automatically locked after activation to prevent
+        unintentional changes.
+        """
         try:
             # Create the constraint by name (most reliable method)
             constraint = FBConstraintManager().TypeCreateConstraint(constraint_type)
@@ -1210,12 +1234,19 @@ class ControlifyDialog(QDialog):
                     
                 constraint.Active = True
                 
-                print(f"Created constraint: {constraint.Name} (snap={use_snap})")
+                # Lock the constraint after activation
+                lock_prop = constraint.PropertyList.Find('Lock')
+                if lock_prop:
+                    lock_prop.Data = True
+                    # print(f"Locked constraint: {constraint.Name}")
+                
+                # print(f"Created constraint: {constraint.Name} (snap={use_snap})")
                 return constraint
                 
         except Exception as e:
-            print(f"Error creating constraint: {str(e)}")
-            traceback.print_exc()
+            # print(f"Error creating constraint: {str(e)}")
+            # traceback.print_exc()
+            pass
             return None
     
     def check_selection(self):
@@ -1406,8 +1437,13 @@ class ControlifyDialog(QDialog):
             except:
                 continue
         
-        # Disable all found constraints
+        # Disable and unlock all found constraints
         for constraint in constraints_to_disable:
+            # First unlock the constraint
+            lock_prop = constraint.PropertyList.Find('Lock')
+            if lock_prop:
+                lock_prop.Data = False
+                # print(f"Unlocked constraint: {constraint.Name}")
             constraint.Active = False
             
         # Unlock offset null transforms including scaling
@@ -1480,18 +1516,23 @@ class ControlifyDialog(QDialog):
                 # Reset the offset null scale to 1,1,1
                 offset_null.SetVector(FBVector3d(1.0, 1.0, 1.0), FBModelTransformationType.kModelScaling, False)
                 
-                print(f"Applied scale factor {scale_factor} to marker size: {current_marker_size} -> {new_marker_size}")
+                # print(f"Applied scale factor {scale_factor} to marker size: {current_marker_size} -> {new_marker_size}")
             
             offset_null.PropertyList.Find('Translation').SetLocked(True)
             offset_null.PropertyList.Find('Rotation').SetLocked(True)
             offset_null.PropertyList.Find('Scaling').SetLocked(True)
         
-        # Re-enable and snap all constraints
+        # Re-enable, snap, and lock all constraints
         if hasattr(self, 'manual_offset_constraints'):
             for constraint in self.manual_offset_constraints:
                 if constraint:
                     constraint.Snap()
                     constraint.Active = True
+                    # Re-lock the constraint
+                    lock_prop = constraint.PropertyList.Find('Lock')
+                    if lock_prop:
+                        lock_prop.Data = True
+                        # print(f"Re-locked constraint: {constraint.Name}")
         
         # Clear selection by setting all components to unselected
         for component in FBSystem().Scene.Components:
@@ -1648,7 +1689,7 @@ class ControlifyDialog(QDialog):
             # Delete all components
             for component in components_to_delete:
                 try:
-                    print(f"Deleting: {component.Name}")
+                    # print(f"Deleting: {component.Name}")
                     component.FBDelete()
                 except:
                     pass
@@ -1673,7 +1714,8 @@ class ControlifyDialog(QDialog):
                         continue
                 
                 if not has_children:
-                    print(f"Found orphaned parent control: {ctrl_parent.Name}")
+                    # print(f"Found orphaned parent control: {ctrl_parent.Name}")
+                    pass
                     
                     # Find and delete all constraints that reference this parent
                     constraints_to_delete = []
@@ -1696,20 +1738,20 @@ class ControlifyDialog(QDialog):
                     # Delete all found constraints
                     for constraint in constraints_to_delete:
                         try:
-                            print(f"Deleting constraint: {constraint.Name}")
+                            # print(f"Deleting constraint: {constraint.Name}")
                             constraint.FBDelete()
                         except Exception as e:
-                            print(f"Failed to delete constraint: {e}")
+                            pass  # Failed to delete constraint
                             
                     # Delete the parent control
                     try:
-                        print(f"Deleting parent control: {ctrl_parent.Name}")
+                        # print(f"Deleting parent control: {ctrl_parent.Name}")
                         ctrl_parent.FBDelete()
                     except Exception as e:
-                        print(f"Failed to delete parent control: {e}")
+                        pass  # Failed to delete parent control
                         
             except Exception as e:
-                print(f"Error checking parent control: {str(e)}")
+                pass  # Error checking parent control
         
         self.status_label.setText(f"Deleted {deleted_count} control rig{'s' if deleted_count > 1 else ''}")
     
@@ -1799,18 +1841,20 @@ def show_dialog():
         # Store a reference to prevent garbage collection
         global controlify_dialog
         controlify_dialog = dialog
-        print("Dialog created and shown successfully")
+        # print("Dialog created and shown successfully")
     except Exception as e:
-        print(f"Error showing dialog: {str(e)}")
-        traceback.print_exc()
+        # print(f"Error showing dialog: {str(e)}")
+        # traceback.print_exc()
+        pass
 
 
 # When script is run directly, create and show the dialog
 # This is the entry point for MotionBuilder
 try:
-    print("Starting Controlify script...")
+    # print("Starting Controlify script...")
     show_dialog()
-    print("Controlify dialog initialized")
+    # print("Controlify dialog initialized")
 except Exception as e:
-    print(f"Critical error: {str(e)}")
-    traceback.print_exc()
+    # print(f"Critical error: {str(e)}")
+    # traceback.print_exc()
+    pass
