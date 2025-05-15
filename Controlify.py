@@ -163,6 +163,33 @@ class ControlifyDialog(QDialog):
         if self.preview_enabled:
             self.toggle_preview(True)
     
+    def get_custom_constraints_folder(self):
+        """Get or create the custom constraints folder"""
+        folder_name = "Custom_Constraints"
+        found_folder = None
+        
+        # Check if the folder already exists in the scene
+        scene = FBSystem().Scene
+        for component in scene.Components:
+            if component.Name == folder_name and component.ClassName() == "FBFolder":
+                found_folder = component
+                break
+        
+        # If folder doesn't exist, create it
+        if not found_folder:
+            # Find the Constraints component to use as the category reference
+            constraints_component = None
+            for component in scene.Components:
+                if component.Name == "Constraints":
+                    constraints_component = component
+                    break
+            
+            if constraints_component:
+                # Create the folder with a reference to the Constraints component
+                found_folder = FBFolder(folder_name, constraints_component)
+        
+        return found_folder
+    
     def ensure_custom_constraints_folder_exists(self):
         """Make sure the custom constraints folder exists"""
         try:
@@ -228,15 +255,30 @@ class ControlifyDialog(QDialog):
         # Add to parent layout
         parent_layout.addWidget(group_box)
         
+        # Constrain object to object checkbox
+        self.manual_pairing_cb = QCheckBox("Constrain object to object")
+        self.manual_pairing_cb.setToolTip("Create constraints directly between two selected objects (First = Source, Second = Target)")
+        self.manual_pairing_cb.setStyleSheet("""
+            QCheckBox:checked {
+                font-weight: bold;
+                color: #00AA00;
+            }
+        """)
+        parent_layout.addWidget(self.manual_pairing_cb)
+        
         # Connect the radio buttons to the preview update function
         self.rb_parent.toggled.connect(self.on_settings_changed)
         self.rb_rotation.toggled.connect(self.on_settings_changed)
         self.rb_position.toggled.connect(self.on_settings_changed)
         self.rb_aim.toggled.connect(self.on_settings_changed)
+        
+        # Connect manual pairing checkbox to handle UI changes
+        self.manual_pairing_cb.toggled.connect(self.on_manual_pairing_toggled)
     
     def create_offset_group(self, parent_layout):
         """Create the controller offset settings group"""
         group_box = QGroupBox("Controller Offset")
+        self.controller_offset_group = group_box  # Store reference
         group_layout = QGridLayout()
         
         # Translation Offset
@@ -327,6 +369,7 @@ class ControlifyDialog(QDialog):
         self.manual_offset_active = False
         self.manual_offset_marker = None
         self.manual_offset_constraint = None
+        self.drag_operation_timer = None
         
         # Set up selection change monitoring
         self.selection_timer = QTimer(self)
@@ -336,6 +379,7 @@ class ControlifyDialog(QDialog):
     def create_marker_appearance_group(self, parent_layout):
         """Create the marker appearance settings group"""
         group_box = QGroupBox("Marker Appearance")
+        self.marker_appearance_group = group_box  # Store reference
         group_layout = QGridLayout()
         
         # Label for marker look dropdown
@@ -359,7 +403,7 @@ class ControlifyDialog(QDialog):
         self.marker_size_spin.setRange(1, 10000)
         self.marker_size_spin.setValue(100)  # Default size
         group_layout.addWidget(self.marker_size_spin, 1, 1)
-        self.marker_size_spin.valueChanged.connect(self.on_settings_changed)
+        self.marker_size_spin.valueChanged.connect(self.on_marker_size_changed)
         
         
         # Marker color controls
@@ -508,6 +552,45 @@ class ControlifyDialog(QDialog):
         self.offset_rot_x.setValue(0.0)
         self.offset_rot_y.setValue(0.0)
         self.offset_rot_z.setValue(0.0)
+    
+    def on_manual_pairing_toggled(self, checked):
+        """Handle manual pairing checkbox toggle"""
+        if checked:
+            # Store preview state before disabling
+            self.preview_was_enabled = self.preview_enabled
+            # Disable preview and gray it out
+            if self.preview_enabled:
+                self.preview_checkbox.setChecked(False)
+            self.preview_checkbox.setEnabled(False)
+            
+            # Hide marker appearance and controller offset groups
+            self.marker_appearance_group.setVisible(False)
+            self.controller_offset_group.setVisible(False)
+            
+            # Update status label
+            self.status_label.setText("Constrain object to object: Select 2 objects (First = Source, Second = Target)")
+        else:
+            # Re-enable preview checkbox
+            self.preview_checkbox.setEnabled(True)
+            # Restore preview state if it was enabled before
+            if hasattr(self, 'preview_was_enabled') and self.preview_was_enabled:
+                self.preview_checkbox.setChecked(True)
+            
+            # Show marker appearance and controller offset groups
+            self.marker_appearance_group.setVisible(True)
+            self.controller_offset_group.setVisible(True)
+            
+            # Reset status label
+            self.status_label.setText("Select objects and press Controlify")
+    
+    def on_marker_size_changed(self, value):
+        """Handle marker size changes, especially during manual offset mode"""
+        # During manual offset mode, apply size changes directly to the marker
+        if self.manual_offset_active and self.manual_offset_marker:
+            self.manual_offset_marker.Size = value
+        else:
+            # Otherwise just treat it as a regular settings change
+            self.on_settings_changed()
     
     def on_settings_changed(self):
         """Update preview markers when settings change"""
@@ -971,7 +1054,33 @@ class ControlifyDialog(QDialog):
             selected_models = FBModelList()
             FBGetSelectedModels(selected_models)
             
-            # Validate selection
+            # Check if manual pairing is enabled
+            if self.manual_pairing_cb.isChecked():
+                # Manual pairing mode - require exactly 2 objects
+                if len(selected_models) != 2:
+                    QMessageBox.warning(self, "Selection Error", 
+                                      "Manual Pairing requires exactly 2 objects.\n"
+                                      "First object = Source, Second object = Target")
+                    return
+                
+                # Create constraint between the two objects
+                source = selected_models[0]
+                target = selected_models[1]
+                constraint_type = self.get_selected_constraint_type()
+                
+                constraint = self.create_direct_constraint(source, target, constraint_type)
+                if constraint:
+                    # Lock the constraint (Snap is already done in create_direct_constraint)
+                    lock_prop = constraint.PropertyList.Find('Lock')
+                    if lock_prop:
+                        lock_prop.Data = True
+                    
+                    self.status_label.setText(f"Created {constraint_type} constraint: {source.Name} → {target.Name}")
+                else:
+                    self.status_label.setText("Failed to create constraint")
+                return
+            
+            # Normal mode - create control rigs
             if len(selected_models) == 0:
                 QMessageBox.warning(self, "Selection Error", "No objects selected. Please select at least one object.")
                 return
@@ -1010,6 +1119,49 @@ class ControlifyDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
             traceback.print_exc()
+    
+    def create_direct_constraint(self, source, target, constraint_type):
+        """Create a direct constraint between two objects"""
+        try:
+            # Create the constraint
+            constraint_manager = FBConstraintManager()
+            
+            # Create appropriate constraint based on type
+            if constraint_type == "Parent/Child":
+                constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+                constraint.ReferenceAdd(0, target)  # Child
+                constraint.ReferenceAdd(1, source)  # Parent
+            elif constraint_type == "Position":
+                constraint = constraint_manager.TypeCreateConstraint("Position")
+                constraint.ReferenceAdd(0, target)  # Constrained
+                constraint.ReferenceAdd(1, source)  # Source
+            elif constraint_type == "Rotation":
+                constraint = constraint_manager.TypeCreateConstraint("Rotation")
+                constraint.ReferenceAdd(0, target)  # Constrained
+                constraint.ReferenceAdd(1, source)  # Source
+            elif constraint_type == "Aim":
+                constraint = constraint_manager.TypeCreateConstraint("Aim")
+                constraint.ReferenceAdd(0, target)  # Constrained
+                constraint.ReferenceAdd(1, source)  # Aim At
+            else:
+                return None
+            
+            # Name the constraint appropriately
+            constraint.Name = f"{source.Name}_to_{target.Name}_{constraint_type}_Constraint"
+            
+            # Set constraint properties
+            constraint.Snap = True
+            constraint.Active = True
+            
+            # Move constraint to custom folder
+            if constraint and self.custom_folder:
+                self.add_constraint_to_folder(constraint)
+            
+            return constraint
+            
+        except Exception as e:
+            print(f"Error creating direct constraint: {e}")
+            return None
     
     def get_or_create_parent_control(self, model):
         """
@@ -1269,7 +1421,28 @@ class ControlifyDialog(QDialog):
                     offset_null = component
                     break
             
-            # If offset null is not selected, reselect it
+            # Check if any objects are selected
+            selected_models = FBModelList()
+            FBGetSelectedModels(selected_models)
+            
+            # If anything other than the offset null is selected
+            if len(selected_models) > 0:
+                # Check if only the offset null is selected
+                if len(selected_models) == 1 and selected_models[0] == offset_null:
+                    # Perfect, cancel any pending timer
+                    if self.drag_operation_timer:
+                        self.drag_operation_timer.stop()
+                    return
+                
+                # Something else is selected - set a timer to reselect offset null
+                if not self.drag_operation_timer or not self.drag_operation_timer.isActive():
+                    self.drag_operation_timer = QTimer(self)
+                    self.drag_operation_timer.setSingleShot(True)
+                    self.drag_operation_timer.timeout.connect(self.force_reselect_offset_null)
+                    self.drag_operation_timer.start(500)  # Wait 0.5 seconds before forcing reselection
+                    return
+            
+            # Nothing is selected, reselect offset null immediately
             if offset_null and not offset_null.Selected:
                 # Clear all selections
                 for component in FBSystem().Scene.Components:
@@ -1405,6 +1578,9 @@ class ControlifyDialog(QDialog):
             
         marker = selected_models[0]
         
+        # Store the current marker size in the UI
+        self.marker_size_spin.setValue(int(marker.Size))
+        
         # Find the offset null (handle different suffixes)
         offset_name = None
         if "_CTRL" in marker.Name:
@@ -1446,10 +1622,12 @@ class ControlifyDialog(QDialog):
                 # print(f"Unlocked constraint: {constraint.Name}")
             constraint.Active = False
             
-        # Unlock offset null transforms including scaling
+        # Unlock offset null transforms except scaling (keep scaling locked)
         offset_null.PropertyList.Find('Translation').SetLocked(False)
         offset_null.PropertyList.Find('Rotation').SetLocked(False)
-        offset_null.PropertyList.Find('Scaling').SetLocked(False)
+        # Keep scaling locked to prevent accidental scaling of the null
+        # Users should scale the marker size directly instead
+        offset_null.PropertyList.Find('Scaling').SetLocked(True)
         
         # Clear selection by setting all components to unselected
         for component in FBSystem().Scene.Components:
@@ -1480,6 +1658,29 @@ class ControlifyDialog(QDialog):
             }
         """)
     
+    def force_reselect_offset_null(self):
+        """Force reselection of the offset null after timer expires"""
+        if self.manual_offset_active:
+            # Find the offset null
+            offset_name = None
+            if "_CTRL" in self.manual_offset_marker.Name:
+                offset_name = self.manual_offset_marker.Name.replace("_CTRL", "_OFFSET")
+            else:
+                offset_name = self.manual_offset_marker.Name + "_OFFSET"
+                
+            offset_null = None
+            for component in FBSystem().Scene.Components:
+                if component.Name == offset_name and component.ClassName() == "FBModelNull":
+                    offset_null = component
+                    break
+            
+            if offset_null:
+                # Clear all selections
+                for component in FBSystem().Scene.Components:
+                    component.Selected = False
+                # Reselect only the offset null
+                offset_null.Selected = True
+    
     def end_manual_offset(self):
         """End manual offset mode"""
         if not self.manual_offset_active:
@@ -1499,25 +1700,7 @@ class ControlifyDialog(QDialog):
                 break
                 
         if offset_null:
-            # Check if the offset null has been scaled
-            scale = FBVector3d()
-            offset_null.GetVector(scale, FBModelTransformationType.kModelScaling, False)
-            
-            # If scaled (not 1,1,1), apply the scale to the marker size
-            if scale[0] != 1.0 or scale[1] != 1.0 or scale[2] != 1.0:
-                # Get the average scale factor
-                scale_factor = (scale[0] + scale[1] + scale[2]) / 3.0
-                
-                # Apply scale to the marker size
-                current_marker_size = self.manual_offset_marker.Size
-                new_marker_size = current_marker_size * scale_factor
-                self.manual_offset_marker.Size = new_marker_size
-                
-                # Reset the offset null scale to 1,1,1
-                offset_null.SetVector(FBVector3d(1.0, 1.0, 1.0), FBModelTransformationType.kModelScaling, False)
-                
-                # print(f"Applied scale factor {scale_factor} to marker size: {current_marker_size} -> {new_marker_size}")
-            
+            # Re-lock all transforms
             offset_null.PropertyList.Find('Translation').SetLocked(True)
             offset_null.PropertyList.Find('Rotation').SetLocked(True)
             offset_null.PropertyList.Find('Scaling').SetLocked(True)
@@ -1545,6 +1728,11 @@ class ControlifyDialog(QDialog):
         self.manual_offset_button.setText("Manual Offset")
         # Reset button style to default
         self.manual_offset_button.setStyleSheet("")
+        
+        # Clean up any drag operation timer
+        if self.drag_operation_timer:
+            self.drag_operation_timer.stop()
+            self.drag_operation_timer = None
         
         # Reset offset UI values to 0
         self.reset_translation()
