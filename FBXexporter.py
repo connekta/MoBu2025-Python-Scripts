@@ -1,3 +1,15 @@
+"""
+FBX Exporter for MotionBuilder
+
+Refactored to separate constraint handling from axis conversion:
+- prepare_constrained_root_for_export(): Handles constraint-based plotting (always executed)
+- apply_axis_conversion_to_root(): Applies Y-up to Z-up rotation (only if enabled)
+- cleanup_after_export(): Unified cleanup based on what was done during preparation
+
+This separation allows the exporter to properly handle constrained roots regardless
+of whether axis conversion is enabled.
+"""
+
 import os
 import json
 import sys
@@ -11,7 +23,7 @@ from PySide6.QtGui import QFont, QIcon, QColor
 
 from pyfbsdk import FBApplication, FBSystem, FBMessageBox, FBModelList, FBModel, FBGetSelectedModels, FBFindModelByLabelName, FBTime, FBAnimationNode
 from pyfbsdk import FBModelNull, FBVector3d, FBConstraintManager, FBPlotOptions, FBRotationFilter, FBBeginChangeAllModels, FBEndChangeAllModels
-from pyfbsdk import FBPlayerControl, FBFbxOptions  # Added FBPlayerControl and FBFbxOptions to imports
+from pyfbsdk import FBPlayerControl, FBFbxOptions, FBUndoManager, FBConstraint  # Added FBPlayerControl, FBFbxOptions, FBUndoManager, and FBConstraint to imports
 
 
 def get_motionbuilder_main_window():
@@ -162,7 +174,15 @@ class MotionBuilderExporter(QMainWindow):
         # Store references to collapsible groups for later updating
         self.group_boxes = {}
         
+        # Debug flag - set to True to enable print statements
+        self.debug = False
+        
         self.init_ui()
+    
+    def debug_print(self, message):
+        """Print message only if debug is enabled"""
+        if self.debug:
+            pass  # Disabled for performance
         
     def init_ui(self):
         """Initialize the main window UI"""
@@ -267,7 +287,7 @@ class MotionBuilderExporter(QMainWindow):
                 json.dump(settings, f, indent=4)
             self.settings = settings
         except Exception as e:
-            print(f"Error saving settings: {e}")
+            # print(f"Error saving settings: {e}")
             FBMessageBox("Export Error", f"Failed to save settings: {e}", "OK")
 
     def get_default_export_folder(self):
@@ -290,34 +310,50 @@ class MotionBuilderExporter(QMainWindow):
     def unparent_skeleton_root(self):
         """Unparent the skeleton root node and store its original parent"""
         if not self.skeleton_root:
-            print("No skeleton root to unparent")
+            # print("No skeleton root to unparent")
             return False
         try:
             if hasattr(self.skeleton_root, 'Parent') and self.skeleton_root.Parent:
-                print(f"Unparenting skeleton root: {self.skeleton_root.Name} from {self.skeleton_root.Parent.Name}")
+                # print(f"Unparenting skeleton root: {self.skeleton_root.Name} from {self.skeleton_root.Parent.Name}")
                 self.original_parent = self.skeleton_root.Parent
+                
+                # Go to first frame to avoid pivot offsets
+                player_control = FBPlayerControl()
+                current_take = FBSystem().CurrentTake
+                first_frame = current_take.LocalTimeSpan.GetStart()
+                player_control.Goto(first_frame)
+                FBSystem().Scene.Evaluate()
+                
                 self.skeleton_root.Parent = None
-                print("Successfully unparented skeleton root")
+                # print("Successfully unparented skeleton root")
                 return True
             else:
-                print("Skeleton root has no parent to unparent from")
+                # print("Skeleton root has no parent to unparent from")
                 return False
         except Exception as e:
-            print(f"Error unparenting skeleton root: {e}")
+            # print(f"Error unparenting skeleton root: {e}")
             return False
             
     def reparent_skeleton_root(self):
         """Reparent the skeleton root to its original parent"""
         if not self.skeleton_root or not self.original_parent:
-            print("Missing skeleton root or original parent for reparenting")
+            # print("Missing skeleton root or original parent for reparenting")
             return False
         try:
-            print(f"Reparenting skeleton root: {self.skeleton_root.Name} to {self.original_parent.Name}")
+            # print(f"Reparenting skeleton root: {self.skeleton_root.Name} to {self.original_parent.Name}")
+            
+            # Go to first frame to avoid pivot offsets
+            player_control = FBPlayerControl()
+            current_take = FBSystem().CurrentTake
+            first_frame = current_take.LocalTimeSpan.GetStart()
+            player_control.Goto(first_frame)
+            FBSystem().Scene.Evaluate()
+            
             self.skeleton_root.Parent = self.original_parent
-            print("Successfully reparented skeleton root")
+            # print("Successfully reparented skeleton root")
             return True
         except Exception as e:
-            print(f"Error reparenting skeleton root: {e}")
+            # print(f"Error reparenting skeleton root: {e}")
             return False
     
             
@@ -329,21 +365,21 @@ class MotionBuilderExporter(QMainWindow):
     def plot_root_animation(self):
         """Plot the root's animation by evaluating each frame using plotAnimation"""
         if not self.skeleton_root:
-            print("No skeleton root to plot")
+            # print("No skeleton root to plot")
             return False
             
         try:
-            print("Starting animation frame-by-frame evaluation and plotting...")
+            # print("Starting animation frame-by-frame evaluation and plotting...")
             
             # Get current take 
             current_take = FBSystem().CurrentTake
-            print(f"Current take: {current_take.Name}")
+            # print(f"Current take: {current_take.Name}")
             
             # Get take timespan to ensure we plot the entire animation
             take_span = current_take.LocalTimeSpan
             start_frame = take_span.GetStart().GetFrame()
             end_frame = take_span.GetStop().GetFrame()
-            print(f"Take timespan: {start_frame} to {end_frame} frames")
+            # print(f"Take timespan: {start_frame} to {end_frame} frames")
             
             # Store current player time to restore it later
             player_control = FBPlayerControl()
@@ -360,13 +396,13 @@ class MotionBuilderExporter(QMainWindow):
             plot_options.RotationFilterToApply = FBRotationFilter.kFBRotationFilterUnroll
             plot_options.UseConstantKeyReducer = False
             
-            print("Testing constraint status...")
+            # print("Testing constraint status...")
             # Jump to first and last frames to check if constraint is working properly
             test_frames = [int(start_frame), int(end_frame)]
             for test_frame in test_frames:
                 player_control.Goto(FBTime(0, 0, 0, test_frame))
                 FBSystem().Scene.Evaluate()
-                print(f"Frame {test_frame}: Position = {self.skeleton_root.Translation}, Rotation = {self.skeleton_root.Rotation}")
+                # print(f"Frame {test_frame}: Position = {self.skeleton_root.Translation}, Rotation = {self.skeleton_root.Rotation}")
             
             # Make sure the root node is selected for plotting
             FBBeginChangeAllModels()
@@ -378,7 +414,7 @@ class MotionBuilderExporter(QMainWindow):
             # Select only the root
             self.skeleton_root.Selected = True
             
-            print(f"Selected root: {self.skeleton_root.LongName}")
+            # print(f"Selected root: {self.skeleton_root.LongName}")
             
             # First method: Use FBSystem().Scene.Evaluate() with PlotTakeOnSelected
             # Go to the start frame to begin plotting
@@ -386,16 +422,16 @@ class MotionBuilderExporter(QMainWindow):
             FBSystem().Scene.Evaluate()
             
             # Plot selected models (only the root should be selected at this point)
-            print("Plotting root animation using PlotTakeOnSelected...")
+            # print("Plotting root animation using PlotTakeOnSelected...")
             try:
                 # Plot all selected objects 
                 current_take.PlotTakeOnSelected(plot_options)
-                print("Plotting completed successfully.")
+                # print("Plotting completed successfully.")
             except Exception as e:
-                print(f"Error during PlotTakeOnSelected: {e}")
+                # print(f"Error during PlotTakeOnSelected: {e}")
                 
                 # Try alternative method: Plot using classic keyframe approach
-                print("Trying alternative method...")
+                # print("Trying alternative method...")
                 self.manual_plot_by_frame(start_frame, end_frame)
             
             FBEndChangeAllModels()
@@ -407,7 +443,7 @@ class MotionBuilderExporter(QMainWindow):
             return True
             
         except Exception as e:
-            print(f"Error plotting root animation: {e}")
+            # print(f"Error plotting root animation: {e}")
             # Try to restore original time in case of error
             if 'original_time' in locals() and 'player_control' in locals():
                 player_control.Goto(original_time)
@@ -415,7 +451,7 @@ class MotionBuilderExporter(QMainWindow):
             
     def manual_plot_by_frame(self, start_frame, end_frame):
         """Manual fallback method to plot frame by frame if the main method fails"""
-        print("Using manual frame-by-frame plotting...")
+        # print("Using manual frame-by-frame plotting...")
         
         player_control = FBPlayerControl()
         
@@ -428,7 +464,7 @@ class MotionBuilderExporter(QMainWindow):
         rotation_node = self.skeleton_root.Rotation.GetAnimationNode()
         
         if not translation_node or not rotation_node:
-            print("Failed to get animation nodes for root")
+            # print("Failed to get animation nodes for root")
             return False
             
         # Clear any existing keys in the FCurves
@@ -457,38 +493,38 @@ class MotionBuilderExporter(QMainWindow):
             rotation_node.KeyAdd(frame_time, [rot_value[0], rot_value[1], rot_value[2]])
             
             if frame % 10 == 0:
-                print(f"Processed frame {frame}/{end_frame}")
+                pass  # Progress update disabled for performance
                 
-        print("Manual plotting completed")
+        # print("Manual plotting completed")
     
     def remove_root_keys(self):
         """Remove all animation keys from the root node"""
         if not self.skeleton_root:
-            print("No skeleton root to remove keys from")
+            # print("No skeleton root to remove keys from")
             return False
             
         try:
-            print(f"Removing animation keys from root: {self.skeleton_root.Name}")
+            # print(f"Removing animation keys from root: {self.skeleton_root.Name}")
             
             # Get the root's animation node
             anim_node = self.skeleton_root.AnimationNode
             if not anim_node:
-                print("No animation node found for root")
+                # print("No animation node found for root")
                 return False
                 
             # Check if we have any keys
             if anim_node.KeyCount == 0:
-                print("No keys to remove")
+                # print("No keys to remove")
                 return True
                 
             # Process all animation nodes recursively
             self.remove_keys_recursive(anim_node)
             
-            print("Successfully removed all keys from root")
+            # print("Successfully removed all keys from root")
             return True
             
         except Exception as e:
-            print(f"Error removing root keys: {e}")
+            # print(f"Error removing root keys: {e}")
             return False
     
     def remove_keys_recursive(self, anim_node):
@@ -496,16 +532,377 @@ class MotionBuilderExporter(QMainWindow):
         try:
             # If this node has an FCurve with keys, clear it
             if hasattr(anim_node, 'FCurve') and anim_node.FCurve:
-                if anim_node.FCurve.Keys:
-                    print(f"Clearing keys from FCurve: {anim_node.Name}")
-                    anim_node.FCurve.EditClear()
+                fcurve = anim_node.FCurve
+                if fcurve and hasattr(fcurve, 'Keys') and len(fcurve.Keys) > 0:
+                    # print(f"Clearing keys from FCurve: {anim_node.Name}")
+                    fcurve.EditClear()
             
-            # Process all child nodes
+            # Process all child nodes - Nodes is a list, not an object with GetCount()
             if hasattr(anim_node, 'Nodes'):
-                for node in anim_node.Nodes:
-                    self.remove_keys_recursive(node)
+                for child in anim_node.Nodes:
+                    self.remove_keys_recursive(child)
         except Exception as e:
-            print(f"Error in remove_keys_recursive: {e}")
+            pass  # Error handling disabled for performance
+    
+    def remove_all_keys_from_root(self):
+        """Remove all animation keys from the root joint"""
+        if not self.skeleton_root:
+            return
+            
+        try:
+            # print("\n=== REMOVING KEYS FROM ROOT ===")
+            cleared_count = 0
+            
+            # Clear animation from all properties
+            for prop in self.skeleton_root.PropertyList:
+                try:
+                    # Check if property is animated
+                    if prop.IsAnimatable() and prop.IsAnimated():
+                        anim_node = prop.GetAnimationNode()
+                        
+                        # Clear FCurve if it exists
+                        if anim_node and anim_node.FCurve:
+                            anim_node.FCurve.EditClear()
+                            cleared_count += 1
+                            # print(f"  Cleared keys from {prop.Name}")
+                        
+                        # Handle properties with sub-nodes (like Translation, Rotation, Scaling)
+                        if anim_node:
+                            for sub_node in anim_node.Nodes:
+                                if sub_node and sub_node.FCurve:
+                                    sub_node.FCurve.EditClear()
+                                    cleared_count += 1
+                                    # print(f"  Cleared keys from {prop.Name}.{sub_node.Name}")
+                except Exception as e:
+                    pass  # Error handling disabled for performance
+            
+            # print(f"Total keys cleared: {cleared_count}")
+            # print("=== KEY REMOVAL COMPLETE ===")
+            
+        except Exception as e:
+            pass  # Error handling disabled for performance
+    
+    # Removed store_root_state - now using capture_original_animation
+    
+    # Removed store_animation_recursive - now using capture_original_animation
+    
+    # Removed restore_root_state - now using restore_from_original_null
+    
+    # Removed restore_animation_recursive - now using restore_from_original_null
+    
+    def prepare_constrained_root_for_export(self):
+        """Detects if root has constraints, captures animation to temporary null and plots it back"""
+        if not self.skeleton_root:
+            return None
+            
+        try:
+            # Check if root has active constraints
+            active_constraints = []
+            src_count = self.skeleton_root.GetSrcCount()
+            for i in range(src_count):
+                const = self.skeleton_root.GetSrc(i)
+                if isinstance(const, FBConstraint) and const.Active:
+                    active_constraints.append(const)
+            
+            has_constraints = len(active_constraints) > 0
+            
+            # Create capture null
+            capture_null = FBModelNull("TEMP_ROOT_CAPTURE")
+            capture_null.Show = False
+            
+            # Create constraint to capture the root's animation
+            constraint_manager = FBConstraintManager()
+            capture_constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+            capture_constraint.Name = "TEMP_CAPTURE_CONSTRAINT"
+            
+            # Set references (child = capture null, parent = root)
+            capture_constraint.ReferenceAdd(0, capture_null)  # Child
+            capture_constraint.ReferenceAdd(1, self.skeleton_root)  # Parent
+            
+            # Snap and activate
+            capture_constraint.Snap = True
+            capture_constraint.Active = True
+            
+            # Plot the capture null (with constraints still active on root)
+            FBBeginChangeAllModels()
+            for model in self.selected_nodes:
+                model.Selected = False
+            capture_null.Selected = True
+            FBEndChangeAllModels()
+            
+            plot_options = FBPlotOptions()
+            plot_options.ConstantKeyReducerKeepOneKey = False
+            plot_options.PlotAllTakes = False
+            plot_options.PlotOnFrame = True
+            plot_options.PlotPeriod = FBTime(0, 0, 0, 1)
+            plot_options.UseConstantKeyReducer = False
+            
+            FBSystem().CurrentTake.PlotTakeOnSelected(plot_options)
+            
+            # Remove the capture constraint
+            capture_constraint.Active = False
+            capture_constraint.FBDelete()
+            
+            # If root has constraints, disable them now
+            disabled_constraints = []
+            if has_constraints:
+                disabled_constraints = self.disable_root_constraints()
+                
+                # Plot the root animation from the capture null
+                restore_constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+                restore_constraint.Name = "TEMP_RESTORE_CONSTRAINT"
+                
+                # Set references (child = root, parent = capture null)
+                restore_constraint.ReferenceAdd(0, self.skeleton_root)  # Child
+                restore_constraint.ReferenceAdd(1, capture_null)  # Parent
+                
+                restore_constraint.Active = True
+                
+                # Plot the root
+                FBBeginChangeAllModels()
+                for model in self.selected_nodes:
+                    model.Selected = False
+                self.skeleton_root.Selected = True
+                FBEndChangeAllModels()
+                
+                FBSystem().CurrentTake.PlotTakeOnSelected(plot_options)
+                
+                # Clean up restore constraint
+                restore_constraint.Active = False
+                restore_constraint.FBDelete()
+            
+            # Restore skeleton selection
+            self.select_skeleton_hierarchy()
+            
+            return {
+                'capture_null': capture_null,
+                'has_constraints': has_constraints,
+                'disabled_constraints': disabled_constraints
+            }
+            
+        except Exception as e:
+            # print(f"Error preparing constrained root: {e}")
+            return None
+    
+    def apply_axis_conversion_to_root(self, capture_null, target_axis):
+        """Apply Y-up to Z-up rotation to an already prepared root"""
+        if not self.skeleton_root or not capture_null:
+            return False
+            
+        try:
+            # Only apply rotation if we're actually converting axes
+            if target_axis == "Y-up":
+                # No conversion needed if already Y-up
+                return True
+                
+            # Create axis conversion null
+            axis_null = FBModelNull("TEMP_AXIS_PARENT")
+            axis_null.Show = False
+            
+            # Set rotation based on target axis
+            if target_axis == "Z-down":
+                # Current implementation - results in upside down character
+                axis_null.Rotation = FBVector3d(-90.0, 0.0, 0.0)
+            elif target_axis == "Z-up":
+                # Add 180° Y rotation to flip character right-side up
+                axis_null.Rotation = FBVector3d(-90.0, 180.0, 0.0)
+            else:
+                # Default to Z-down behavior
+                axis_null.Rotation = FBVector3d(-90.0, 0.0, 0.0)
+            
+            # Parent the capture null to the axis null
+            player_control = FBPlayerControl()
+            current_take = FBSystem().CurrentTake
+            first_frame = current_take.LocalTimeSpan.GetStart()
+            player_control.Goto(first_frame)
+            FBSystem().Scene.Evaluate()
+            
+            capture_null.Parent = axis_null
+            
+            # Create constraint from capture null (now rotated) to root
+            constraint_manager = FBConstraintManager()
+            final_constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+            final_constraint.Name = "TEMP_AXIS_CONSTRAINT"
+            
+            # Set references (child = root, parent = capture null)
+            final_constraint.ReferenceAdd(0, self.skeleton_root)  # Child
+            final_constraint.ReferenceAdd(1, capture_null)  # Parent
+            
+            final_constraint.Active = True
+            FBSystem().Scene.Evaluate()
+            
+            # Plot the root with axis conversion applied
+            FBBeginChangeAllModels()
+            for model in self.selected_nodes:
+                model.Selected = False
+            self.skeleton_root.Selected = True
+            FBEndChangeAllModels()
+            
+            plot_options = FBPlotOptions()
+            plot_options.ConstantKeyReducerKeepOneKey = False
+            plot_options.PlotAllTakes = False
+            plot_options.PlotOnFrame = True
+            plot_options.PlotPeriod = FBTime(0, 0, 0, 1)
+            plot_options.UseConstantKeyReducer = False
+            
+            FBSystem().CurrentTake.PlotTakeOnSelected(plot_options)
+            
+            # Clean up
+            final_constraint.Active = False
+            final_constraint.FBDelete()
+            axis_null.FBDelete()
+            
+            # Restore skeleton selection
+            self.select_skeleton_hierarchy()
+            
+            return True
+            
+        except Exception as e:
+            # print(f"Error applying axis conversion: {e}")
+            return False
+    
+    def cleanup_after_export(self, export_data):
+        """Clean up after export based on what was done during preparation"""
+        if not export_data:
+            return
+            
+        try:
+            capture_null = export_data.get('capture_null')
+            has_constraints = export_data.get('has_constraints', False)
+            disabled_constraints = export_data.get('disabled_constraints', [])
+            
+            # Clean up capture null
+            if capture_null:
+                capture_null.Selected = False
+                capture_null.FBDelete()
+            
+            # If root had constraints, clean up and re-enable them
+            if has_constraints and disabled_constraints:
+                # Remove all keys from root (for cleaner result)
+                self.remove_all_keys_from_root()
+                
+                # Re-enable the constraints
+                self.restore_constraints(disabled_constraints)
+            
+        except Exception as e:
+            # print(f"Error during cleanup: {e}")
+            pass
+    
+    
+    def disable_root_constraints(self):
+        """Find and disable any constraints affecting the root"""
+        if not self.skeleton_root:
+            # print("No skeleton root found")
+            return []
+            
+        disabled_constraints = []
+        
+        try:
+            # print(f"\n=== DISABLE ROOT CONSTRAINTS ===")
+            # print(f"Root: {self.skeleton_root.Name}")
+            # print(f"Root position before disable: T={self.skeleton_root.Translation}, R={self.skeleton_root.Rotation}")
+            
+            # Get all destinations (things that this object affects)
+            try:
+                dst_count = self.skeleton_root.GetDstCount()
+                # print(f"GetDstCount: {dst_count}")
+                for i in range(dst_count):
+                    const = self.skeleton_root.GetDst(i)
+                    if isinstance(const, FBConstraint):
+                        # print(f"  Found constraint (as source): {const.Name}")
+                        # print(f"    Type: {const.ClassName()}")
+                        # print(f"    Active: {const.Active}")
+                        if const.Active:
+                            const.Active = False
+                            disabled_constraints.append(const)
+                            # print(f"    ** Disabled constraint: {const.Name}")
+            except Exception as e:
+                pass  # Error handling disabled for performance
+            
+            # Get all sources (things that affect this object)
+            try:
+                src_count = self.skeleton_root.GetSrcCount()
+                # print(f"GetSrcCount: {src_count}")
+                for i in range(src_count):
+                    const = self.skeleton_root.GetSrc(i)
+                    if isinstance(const, FBConstraint):
+                        # print(f"  Found constraint (as destination): {const.Name}")
+                        # print(f"    Type: {const.ClassName()}")
+                        # print(f"    Active: {const.Active}")
+                        if const.Active:
+                            const.Active = False
+                            disabled_constraints.append(const)
+                            # print(f"    ** Disabled constraint: {const.Name}")
+            except Exception as e:
+                pass  # Error handling disabled for performance
+            
+            # print(f"\nTotal constraints disabled: {len(disabled_constraints)}")
+            for constraint in disabled_constraints:
+                pass  # Constraint listing disabled for performance
+            
+            # print(f"Root position after disable: T={self.skeleton_root.Translation}, R={self.skeleton_root.Rotation}")
+            # print("=== DISABLE COMPLETE ===")
+            return disabled_constraints
+            
+        except Exception as e:
+            # print(f"Error disabling root constraints: {e}")
+            import traceback
+            traceback.print_exc()
+            return disabled_constraints
+    
+    def restore_constraints(self, constraints):
+        """Re-enable previously disabled constraints"""
+        if not constraints:
+            return
+            
+        # print(f"\n=== RESTORE CONSTRAINTS ===")
+        # print(f"Restoring {len(constraints)} constraints...")
+        for constraint in constraints:
+            try:
+                constraint.Active = True
+                # print(f"  Re-enabled constraint: {constraint.Name}")
+            except Exception as e:
+                pass  # Error handling disabled for performance
+        
+        # Force scene evaluation to update the root with constraint effects
+        # print("Evaluating scene to update constraint effects...")
+        FBSystem().Scene.Evaluate()
+        
+        # Go to first frame and evaluate again
+        player_control = FBPlayerControl()
+        current_take = FBSystem().CurrentTake
+        first_frame = current_take.LocalTimeSpan.GetStart()
+        player_control.Goto(first_frame)
+        FBSystem().Scene.Evaluate()
+        
+        # print("=== RESTORE CONSTRAINTS COMPLETE ===")
+    
+    def prepare_root_for_export(self, target_axis=None):
+        """Prepare the root for export with optional axis conversion"""
+        if not self.skeleton_root:
+            return None
+            
+        try:
+            # First, handle constraint-based plotting (always done)
+            export_data = self.prepare_constrained_root_for_export()
+            if not export_data:
+                return None
+            
+            # Apply axis conversion if specified
+            if target_axis and target_axis != "Y-up":
+                capture_null = export_data.get('capture_null')
+                if capture_null:
+                    success = self.apply_axis_conversion_to_root(capture_null, target_axis)
+                    if not success:
+                        # Clean up on failure
+                        self.cleanup_after_export(export_data)
+                        return None
+            
+            return export_data
+            
+        except Exception as e:
+            # print(f"Error preparing root for export: {e}")
+            return None
     
     
     def create_progress_bar(self, parent_layout):
@@ -590,6 +987,32 @@ class MotionBuilderExporter(QMainWindow):
         
         options_layout.addWidget(anim_group, 1, 0, 1, 3)
         
+        # Axis conversion options
+        axis_group = QGroupBox("Axis Conversion")
+        axis_layout = QGridLayout(axis_group)
+        
+        self.axis_conversion_cb = QCheckBox("Convert Axis")
+        self.axis_conversion_cb.setChecked(self.load_settings().get("axis_conversion", {}).get("enabled", False))
+        axis_layout.addWidget(self.axis_conversion_cb, 0, 0)
+        
+        axis_label = QLabel("Target Up Axis:")
+        axis_layout.addWidget(axis_label, 0, 1)
+        
+        self.up_axis_combo = QComboBox()
+        self.up_axis_combo.addItems(["Y-up", "Z-up", "Z-down"])
+        # Default to Z-down for axis conversion (since MotionBuilder is already Y-up)
+        self.up_axis_combo.setCurrentText(self.load_settings().get("axis_conversion", {}).get("target_axis", "Z-down"))
+        axis_layout.addWidget(self.up_axis_combo, 0, 2)
+        
+        # Connect combo box change to auto-toggle checkbox
+        self.up_axis_combo.currentTextChanged.connect(self.on_axis_combo_changed)
+        
+        # Initialize checkbox state based on current selection
+        self.on_axis_combo_changed(self.up_axis_combo.currentText())
+        
+        
+        options_layout.addWidget(axis_group, 2, 0, 1, 3)
+        
         # Skeleton info
         skeleton_group = QGroupBox("Skeleton Information")
         skeleton_layout = QVBoxLayout(skeleton_group)
@@ -597,12 +1020,23 @@ class MotionBuilderExporter(QMainWindow):
         self.skeleton_info_label = QLabel("Skeleton Root: Not detected\nSelected Nodes: 0")
         skeleton_layout.addWidget(self.skeleton_info_label)
         
-        options_layout.addWidget(skeleton_group, 2, 0, 1, 3)
+        options_layout.addWidget(skeleton_group, 3, 0, 1, 3)
         
         parent_layout.addWidget(self.options_widget)
         
         # Initially hide options
         self.options_widget.hide()
+        
+    def on_axis_combo_changed(self, axis_text):
+        """Handle axis combo box changes - auto toggle checkbox and enable/disable it"""
+        if axis_text == "Y-up":
+            # Y-up is MotionBuilder's default, so disable conversion
+            self.axis_conversion_cb.setChecked(False)
+            self.axis_conversion_cb.setEnabled(False)
+        else:
+            # Any other axis needs conversion
+            self.axis_conversion_cb.setChecked(True)
+            self.axis_conversion_cb.setEnabled(True)
         
     def open_settings_file(self):
         """Open the settings JSON file in the default text editor"""
@@ -657,7 +1091,7 @@ class MotionBuilderExporter(QMainWindow):
                     skeleton_root = root
                     break
             except Exception as e:
-                print(f"Error looking for {name}: {e}")
+                # print(f"Error looking for {name}: {e}")
                 continue
                 
         if not skeleton_root:
@@ -671,7 +1105,7 @@ class MotionBuilderExporter(QMainWindow):
         try:
             self.select_children_simple(skeleton_root)
         except Exception as e:
-            print(f"Error selecting children: {e}")
+            pass  # Error handling disabled for performance
         self.deselect_null_objects()
         selection = FBModelList()
         FBGetSelectedModels(selection)
@@ -706,12 +1140,12 @@ class MotionBuilderExporter(QMainWindow):
                         except IndexError:
                             break
                         except Exception as e:
-                            print(f"Error accessing child {i}: {e}")
+                            # print(f"Error accessing child {i}: {e}")
                             i += 1
                             if i > 1000:
                                 break
         except Exception as e:
-            print(f"Error in select_children_simple for {node.Name if hasattr(node, 'Name') else 'unnamed'}: {e}")
+            pass  # Error handling disabled for performance
     
     def process_child(self, child):
         """Process a single child node - select it if not a null object and recurse to its children"""
@@ -729,7 +1163,7 @@ class MotionBuilderExporter(QMainWindow):
                 child.Selected = True
             self.select_children_simple(child)
         except Exception as e:
-            print(f"Error processing child: {e}")
+            pass  # Error handling disabled for performance
             
     def deselect_null_objects(self):
         """Deselect any null objects that might be selected"""
@@ -1077,19 +1511,19 @@ class MotionBuilderExporter(QMainWindow):
         """Handle the export button click with reliable cleanup routines"""
         cleanup_required = False
         try:
-            print("Starting export process")
+            # print("Starting export process")
             if not self.select_skeleton_hierarchy():
-                print("Failed to select skeleton hierarchy")
+                # print("Failed to select skeleton hierarchy")
                 QMessageBox.warning(self, "Export Warning", "Failed to select skeleton hierarchy.")
                 return
                 
             try:
                 if self.unparent_skeleton_root():
                     cleanup_required = True
-                    print("Successfully unparented skeleton root")
+                    # print("Successfully unparented skeleton root")
                 
             except Exception as e:
-                print(f"Warning: Error unparenting skeleton root: {e}")
+                # print(f"Warning: Error unparenting skeleton root: {e}")
                 QMessageBox.warning(self, "Export Warning", f"Error preparing skeleton: {e}")
             
             export_items = []
@@ -1131,6 +1565,10 @@ class MotionBuilderExporter(QMainWindow):
                 "prefix": self.prefix_entry.text(),
                 "bake_animation": self.bake_anim_cb.isChecked(),
                 "export_log": self.export_log_cb.isChecked(),
+                "axis_conversion": {
+                    "enabled": self.axis_conversion_cb.isChecked(),
+                    "target_axis": self.up_axis_combo.currentText()
+                },
                 "takes": {}
             }
             
@@ -1170,16 +1608,16 @@ class MotionBuilderExporter(QMainWindow):
                 self.open_export_log(updated_settings)
         
         except Exception as e:
-            print(f"Error during export process: {e}")
+            # print(f"Error during export process: {e}")
             QMessageBox.critical(self, "Export Error", f"Error during export process: {e}")
         finally:
             try:
                 # Reparent the skeleton root
                 if cleanup_required:
-                    print("Reparenting skeleton root in finally block")
+                    # print("Reparenting skeleton root in finally block")
                     self.reparent_skeleton_root()
             except Exception as e:
-                print(f"Error during cleanup: {e}")
+                pass  # Error handling disabled for performance
     
     def export_selected_takes(self, global_folder, export_items, prefix, bake_animation=True):
         """Export the selected takes to FBX files"""
@@ -1191,6 +1629,15 @@ class MotionBuilderExporter(QMainWindow):
         takes_export_info = {}
         total = len(export_items)
         
+        # Check if axis conversion is enabled using the UI checkboxes directly
+        axis_conversion_enabled = self.axis_conversion_cb.isChecked()
+        target_axis = self.up_axis_combo.currentText()
+        
+        # Store original root state if axis conversion is enabled
+        original_root_state = None
+        if axis_conversion_enabled and self.skeleton_root:
+            pass  # Axis conversion enabled
+        
         for idx, item in enumerate(export_items, start=1):
             take = item["take"]
             export_folder = item["export_folder"]
@@ -1200,28 +1647,55 @@ class MotionBuilderExporter(QMainWindow):
             if not os.path.isdir(export_folder):
                 try:
                     os.makedirs(export_folder)
-                    print(f"Created folder: {export_folder}")
+                    # print(f"Created folder: {export_folder}")
                 except Exception as e:
-                    print(f"Error creating folder {export_folder}: {e}")
+                    # print(f"Error creating folder {export_folder}: {e}")
                     QMessageBox.warning(self, "Export Error", f"Failed to create folder: {export_folder}")
                     continue
             
             try:
                 # Set current take
-                print(f"Setting current take to: {take.Name}")
+                # print(f"Setting current take to: {take.Name}")
                 FBSystem().CurrentTake = take
+                
+                # Always prepare root for export (handles constraints)
+                export_prep_data = None
+                if self.skeleton_root:
+                    # print(f"\n>>> Preparing take '{take.Name}' for export...")
+                    # Apply axis conversion only if enabled
+                    if axis_conversion_enabled:
+                        export_prep_data = self.prepare_root_for_export(target_axis)
+                    else:
+                        export_prep_data = self.prepare_root_for_export(None)
+                    
+                    if not export_prep_data:
+                        export_prep_data = None
+                        # print(">>> WARNING: Failed to prepare root for export")
                 
                 # Standard export
                 file_name = (prefix if prefix else "") + take.Name + ".fbx"
                 export_path = os.path.join(export_folder, file_name)
-                print(f"Exporting take: {take.Name} to {export_path}")
+                # print(f"Exporting take: {take.Name} to {export_path}")
                 FBApplication().FileExport(export_path)
-                print(f"Exported take: {take.Name} to {export_path}")
+                # print(f"Exported take: {take.Name} to {export_path}")
                 exported = True
                 
+                # Handle post-export cleanup
+                if export_prep_data:
+                    # print("\n>>> Starting post-export cleanup...")
+                    self.cleanup_after_export(export_prep_data)
+                    # print(">>> Post-export cleanup complete")
+                
             except Exception as e:
-                print(f"Error exporting take: {take.Name} - {e}")
+                # print(f"Error exporting take: {take.Name} - {e}")
                 exported = False
+                
+                # Make sure to restore state even on error
+                if export_prep_data:
+                    try:
+                        self.cleanup_after_export(export_prep_data)
+                    except:
+                        pass
             
             takes_export_info[take.Name] = {"export_path": export_path, "exported": exported}
             self.progress_bar.setValue(idx)
@@ -1325,7 +1799,7 @@ class MotionBuilderExporter(QMainWindow):
         try:
             os.startfile(folder)
         except Exception as e:
-            print(f"Error opening folder: {e}")
+            # print(f"Error opening folder: {e}")
             QMessageBox.warning(self, "Error", f"Unable to open folder: {e}")
 
 
@@ -1342,7 +1816,7 @@ def main():
         app.exec()
     except Exception as e:
         FBMessageBox("Error", f"An error occurred in the exporter: {str(e)}", "OK")
-        print(f"Error in exporter: {e}")
+        # print(f"Error in exporter: {e}")
         raise
 
 main()

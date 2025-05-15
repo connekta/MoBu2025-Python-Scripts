@@ -1200,14 +1200,9 @@ class ScriptShelf(QtWidgets.QWidget):
     def update_time_labels(self):
         times = self.time_tracker.get_times_report()
         display_name = format_filename(times["file"])
-        self.current_file_label.setText(make_label("Current File:", format_duration(times["file_total"])))
-        self.current_file_today_label.setText(make_label("Current File (Today):", format_duration(times["file_today"])))
-        if times["file"] == "Untitled":
-            self.folder_label.setText(make_label("Folder:", "N/A"))
-            self.parent_folder_label.setText(make_label("Parent Folder:", "N/A"))
-        else:
-            self.folder_label.setText(make_label(f"/{times['folder']}/:", format_duration(times["folder_total"])))
-            self.parent_folder_label.setText(make_label(f"/{times['parent_folder']}/:", format_duration(times["parent_folder_total"])))
+        # Pass the time data to the options window if it exists
+        if self.options_window:
+            self.options_window.update_time_labels()
     def show_time_report(self):
         # Use FixedTimeReportWindow so that parent's timer is restarted properly.
         report_window = FixedTimeReportWindow(self, self.log_timer, self.time_tracker)
