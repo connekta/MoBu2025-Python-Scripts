@@ -65,7 +65,7 @@ def save_window_settings(window):
         with open(settings_path, 'w') as f:
             json.dump(settings, f)
     except Exception as e:
-        print(f"Error saving window settings: {e}")
+        pass  # Error saving window settings
 
 def load_window_settings(window):
     """Load window position and size"""
@@ -77,13 +77,14 @@ def load_window_settings(window):
                 window.move(settings.get('pos_x', 100), settings.get('pos_y', 100))
                 window.resize(settings.get('width', 400), settings.get('height', 500))
         except Exception as e:
-            print(f"Error loading window settings: {e}")
+            pass  # Error loading window settings
             window.move(100, 100)
             window.resize(400, 500)
 
 class TakeChangeMonitor(QObject):
     """Monitor changes in the scene's takes."""
     takeChanged = Signal()
+    currentTakeChanged = Signal()  # New signal specifically for current take changes
     
     def __init__(self):
         super(TakeChangeMonitor, self).__init__()
@@ -93,19 +94,31 @@ class TakeChangeMonitor(QObject):
         self.last_current_take = self.system.CurrentTake.Name if self.system.CurrentTake else None
         self.timer = QTimer()
         self.timer.timeout.connect(self.check_takes)
-        self.timer.start(10000)  # Check every 10 seconds instead of every second
+        self.timer.start(250)  # Check every 250ms for even more responsive updates
     
     def check_takes(self):
         system = FBSystem()
-        current_take_count = len(system.Scene.Takes)
-        current_take_names = [system.Scene.Takes[i].Name for i in range(len(system.Scene.Takes))]
+        
+        # Quick check for current take change (most common case)
         current_current_take = system.CurrentTake.Name if system.CurrentTake else None
-        if (current_take_count != self.last_take_count or 
-            current_take_names != self.last_take_names or
-            current_current_take != self.last_current_take):
-            self.last_take_count = current_take_count
-            self.last_take_names = current_take_names
+        if current_current_take != self.last_current_take:
             self.last_current_take = current_current_take
+            self.currentTakeChanged.emit()  # Emit specific signal for current take changes
+            return
+            
+        # Less frequent check for take count/names changes
+        current_take_count = len(system.Scene.Takes)
+        if current_take_count != self.last_take_count:
+            self.last_take_count = current_take_count
+            current_take_names = [system.Scene.Takes[i].Name for i in range(len(system.Scene.Takes))]
+            self.last_take_names = current_take_names
+            self.takeChanged.emit()
+            return
+            
+        # Full check for name changes (most expensive)
+        current_take_names = [system.Scene.Takes[i].Name for i in range(len(system.Scene.Takes))]
+        if current_take_names != self.last_take_names:
+            self.last_take_names = current_take_names
             self.takeChanged.emit()
 
 class TagDialog(QDialog):
@@ -207,6 +220,13 @@ class DraggableListWidget(QListWidget):
         self.editing_item = None
         self.editor = None
     
+    def mousePressEvent(self, event):
+        """Handle mouse press - clear selection when clicking empty space"""
+        super(DraggableListWidget, self).mousePressEvent(event)
+        # Check if clicked on empty space - use position() instead of deprecated pos()
+        if not self.indexAt(event.position().toPoint()).isValid():
+            self.clearSelection()
+    
     def dropEvent(self, event):
         source_row = self.currentRow()
         self.internal_drop = True
@@ -266,7 +286,7 @@ class DraggableListWidget(QListWidget):
             self.editor.setFocus()
             self.editing_item = item
         except RuntimeError as e:
-            print(f"Error starting inline edit: {e}")
+            pass  # Error starting inline edit
             self.editing_item = None
         
     def _finishEditing(self):
@@ -283,9 +303,7 @@ class DraggableListWidget(QListWidget):
                     self.window._rename_take_inline(old_name, new_name)
                 
         except Exception as e:
-            print(f"Error finishing edit: {e}")
-            import traceback
-            traceback.print_exc()
+            pass  # Error finishing edit
         finally:
             if self.editor:
                 self.editor.hide()
@@ -317,6 +335,7 @@ class TakeHandlerWindow(QMainWindow):
         self.config_path = self._get_config_path()
         self.monitor = TakeChangeMonitor()
         self.monitor.takeChanged.connect(self.update_take_list)
+        self.monitor.currentTakeChanged.connect(self.update_current_take_only)  # Connect the fast update for current take changes
         
         # Track expanded/collapsed state of groups
         self.expanded_groups = {}
@@ -400,7 +419,7 @@ class TakeHandlerWindow(QMainWindow):
                         # Default to expanded
                         self.expanded_groups = {}
             except Exception as e:
-                print(f"Error loading configuration: {e}")
+                pass  # Error loading configuration
     
     def _save_config(self):
         save_data = {}
@@ -420,7 +439,7 @@ class TakeHandlerWindow(QMainWindow):
             with open(self.config_path, 'w') as f:
                 json.dump(save_data, f, indent=2)
         except Exception as e:
-            print(f"Error saving configuration: {e}")
+            pass  # Error saving configuration
     
     def _get_all_tags(self):
         tags = set()
@@ -479,9 +498,7 @@ class TakeHandlerWindow(QMainWindow):
             self.update_take_list()
             
         except Exception as e:
-            print(f"Error reordering takes: {e}")
-            import traceback
-            traceback.print_exc()
+            pass  # Error reordering takes
             QMessageBox.warning(self, "Error", f"Failed to reorder takes: {e}")
             self.update_take_list()
     
@@ -766,10 +783,8 @@ class TakeHandlerWindow(QMainWindow):
             if original_take:
                 new_name = f"{take_name}_copy"
                 try:
-                    new_take = FBTake(new_name)
-                    new_take.LocalTimeSpan = original_take.LocalTimeSpan
-                    new_take.ReferenceTimeSpan = original_take.ReferenceTimeSpan
-                    system.Scene.Takes.append(new_take)
+                    # Use CopyTake to properly duplicate the take with all animation data
+                    new_take = original_take.CopyTake(new_name)
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to duplicate take {take_name}: {e}")
         
@@ -918,14 +933,14 @@ class TakeHandlerWindow(QMainWindow):
             
             if take_to_delete:
                 try:
-                    print(f"Deleting take {take_to_delete.Name} at index {take_index}")
+                    pass  # Deleting take
                     
                     # Make sure we're not deleting the current take
                     if system.CurrentTake == take_to_delete and len(scene.Takes) > 1:
                         # Find another take to set as current before deleting
                         for i in range(len(scene.Takes)):
                             if i != take_index:
-                                print(f"Setting new current take: {scene.Takes[i].Name}")
+                                pass  # Setting new current take
                                 system.CurrentTake = scene.Takes[i]
                                 break
                     
@@ -939,16 +954,16 @@ class TakeHandlerWindow(QMainWindow):
                             break
                     
                     if takes_list:
-                        print(f"Found takes list component. Disconnecting take")
+                        pass  # Found takes list component
                         # Disconnect the take from the takes list
                         take_to_delete.DisconnectDst(takes_list)
                         
                         # Also disconnect from the scene if needed
                         take_to_delete.DisconnectDst(scene)
                         
-                        print(f"Take disconnected successfully")
+                        pass  # Take disconnected successfully
                     else:
-                        print("Could not find takes list component, trying scene.takes.remove")
+                        pass  # Could not find takes list component
                         scene.Takes.remove(take_index)
                     
                     # Update our take data
@@ -959,11 +974,9 @@ class TakeHandlerWindow(QMainWindow):
                     self._save_config()
                     self.update_take_list()
                     
-                    print("Take deletion complete")
+                    pass  # Take deletion complete
                 except Exception as e:
-                    print(f"Error details: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+                    pass  # Error details
                     QMessageBox.warning(self, "Error", f"Failed to delete take: {e}")
     
     def _set_take_tag(self, take_name):
@@ -1041,9 +1054,7 @@ class TakeHandlerWindow(QMainWindow):
                 self.update_take_list()
                 
             except Exception as e:
-                print(f"Error adding new take structure: {e}")
-                import traceback
-                traceback.print_exc()
+                pass  # Error adding new take structure
                 QMessageBox.warning(self, "Error", f"Failed to add takes: {e}")
             
         else:
@@ -1070,9 +1081,7 @@ class TakeHandlerWindow(QMainWindow):
                 self.update_take_list()
                 
             except Exception as e:
-                print(f"Error adding new take: {e}")
-                import traceback
-                traceback.print_exc()
+                pass  # Error adding new take
                 QMessageBox.warning(self, "Error", f"Failed to add take: {e}")
     
     def _add_take_below(self, take_name):
@@ -1130,9 +1139,7 @@ class TakeHandlerWindow(QMainWindow):
             self.update_take_list()
             
         except Exception as e:
-            print(f"Error adding take below: {e}")
-            import traceback
-            traceback.print_exc()
+            pass  # Error adding take below
             QMessageBox.warning(self, "Error", f"Failed to add take: {e}")
     
     def _duplicate_take(self, take_name):
@@ -1147,9 +1154,8 @@ class TakeHandlerWindow(QMainWindow):
             new_name, ok = QInputDialog.getText(self, "Duplicate Take", "Enter new take name:", QLineEdit.Normal, f"{take_name}_copy")
             if ok and new_name.strip():
                 try:
-                    new_take = FBTake(new_name.strip())
-                    new_take.LocalTimeSpan = original_take.LocalTimeSpan
-                    system.Scene.Takes.append(new_take)
+                    # Use CopyTake to properly duplicate the take with all animation data
+                    new_take = original_take.CopyTake(new_name.strip())
                     self.update_take_list()
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to duplicate take: {e}")
@@ -1187,9 +1193,7 @@ class TakeHandlerWindow(QMainWindow):
                 self._save_config()
                 self.update_take_list()
             except Exception as e:
-                print(f"Error renaming take: {e}")
-                import traceback
-                traceback.print_exc()
+                pass  # Error renaming take
                 QMessageBox.warning(self, "Error", f"Failed to rename take: {e}")
                 
     def _start_inline_rename(self, take_name):
@@ -1233,6 +1237,20 @@ class TakeHandlerWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to rename take: {e}")
     
+    def update_current_take_only(self):
+        """Fast update method that only updates the current take highlighting."""
+        system = FBSystem()
+        current_take_clean = ""
+        if system.CurrentTake:
+            current_take_clean = strip_prefix(system.CurrentTake.Name)
+            
+        # Go through all items and update their display
+        for i in range(self.take_list.count()):
+            item = self.take_list.item(i)
+            if item:
+                is_current = (item.take_name == current_take_clean)
+                item.update_display(is_current)
+                
     def update_take_list(self):
         """Update the custom UI list using the stripped names for display."""
         selected_row = self.take_list.currentRow()
@@ -1319,8 +1337,7 @@ class TakeHandlerWindow(QMainWindow):
     
     def on_item_double_click(self, item):
         """Set the current take or toggle group expansion based on double-click."""
-        # Do a simple print to help debug
-        print("Double-click detected on item:", item.take_name if item else "None")
+        # Debug logging removed
         
         if not item:
             return
@@ -1347,6 +1364,13 @@ class TakeHandlerWindow(QMainWindow):
                 take = system.Scene.Takes[i]
                 if strip_prefix(take.Name) == selected_take_clean:
                     system.CurrentTake = take
+                    # Force deselection by setting current item to None after update
+                    def deselect_after_update():
+                        self.take_list.setCurrentItem(None)
+                        self.take_list.clearSelection()
+                    
+                    # Schedule deselection after update completes
+                    QTimer.singleShot(100, deselect_after_update)
                     self.update_take_list()
                     break
     
