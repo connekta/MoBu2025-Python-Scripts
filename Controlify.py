@@ -109,6 +109,11 @@ class ControlifyDialog(QDialog):
         self.preview_enabled = True  # Default to enabled
         self.preview_timer = None
         
+        # Track selection order for object-to-object constraints
+        self.selection_order_list = []  # Will store exactly 2 objects in selection order
+        self.last_selection_state = set()  # Track what was selected last frame
+        self.setup_selection_tracking()
+        
         # Create the main layout
         main_layout = QVBoxLayout()
         self.setLayout(main_layout)
@@ -566,6 +571,10 @@ class ControlifyDialog(QDialog):
             # Hide marker appearance and controller offset groups
             self.marker_appearance_group.setVisible(False)
             self.controller_offset_group.setVisible(False)
+            
+            # Clear selection tracking when entering manual pairing mode
+            self.selection_order_list = []
+            self.last_selection_state = set()
             
             # Update status label
             self.status_label.setText("Constrain object to object: Select 2 objects (First = Source, Second = Target)")
@@ -1063,9 +1072,16 @@ class ControlifyDialog(QDialog):
                                       "First object = Source, Second object = Target")
                     return
                 
-                # Create constraint between the two objects
-                source = selected_models[0]
-                target = selected_models[1]
+                # Use our selection tracking to get the proper order
+                source, target = self.get_ordered_selection()
+                
+                # Verify we have valid selection order
+                if not source or not target:
+                    # Fallback to selected models (shouldn't happen with proper tracking)
+                    source = selected_models[0]
+                    target = selected_models[1]
+                
+                
                 constraint_type = self.get_selected_constraint_type()
                 
                 constraint = self.create_direct_constraint(source, target, constraint_type)
@@ -1123,14 +1139,30 @@ class ControlifyDialog(QDialog):
     def create_direct_constraint(self, source, target, constraint_type):
         """Create a direct constraint between two objects"""
         try:
+            # Debug: Print what we're trying to constrain (only if debug mode is enabled)
+            debug_mode = False  # Set to True to enable debug prints
+            if debug_mode:
+                print(f"Creating {constraint_type} constraint: {source.Name} ({source.ClassName()}) -> {target.Name} ({target.ClassName()})")
+            
             # Create the constraint
             constraint_manager = FBConstraintManager()
+            constraint = None
+            
+            # Special handling for markers - they seem to have issues with reference ordering
+            # When a marker is the source, we need to handle the constraint creation differently
+            source_is_marker = source.ClassName() == "FBModelMarker"
+            target_is_marker = target.ClassName() == "FBModelMarker"
+            
+            if debug_mode and (source_is_marker or target_is_marker):
+                print(f"Marker detected - Source is marker: {source_is_marker}, Target is marker: {target_is_marker}")
             
             # Create appropriate constraint based on type
             if constraint_type == "Parent/Child":
                 constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
-                constraint.ReferenceAdd(0, target)  # Child
-                constraint.ReferenceAdd(1, source)  # Parent
+                # Standard order: Target is constrained by Source
+                constraint.ReferenceAdd(0, target)  # Child (constrained)
+                constraint.ReferenceAdd(1, source)  # Parent (source)
+            
             elif constraint_type == "Position":
                 constraint = constraint_manager.TypeCreateConstraint("Position")
                 constraint.ReferenceAdd(0, target)  # Constrained
@@ -1145,6 +1177,55 @@ class ControlifyDialog(QDialog):
                 constraint.ReferenceAdd(1, source)  # Aim At
             else:
                 return None
+            
+            # IMPORTANT FIX: After adding references, check if they were assigned correctly
+            # MotionBuilder sometimes reassigns references incorrectly with markers
+            # Note: ReferenceGetCount() requires a group index argument
+            ref_count = constraint.ReferenceGroupGetCount()
+            if debug_mode:
+                print(f"Reference group count: {ref_count}")
+            
+            if ref_count > 0:
+                # Get the count for the first reference group (usually 0)
+                count = constraint.ReferenceGetCount(0)
+                if debug_mode:
+                    print(f"References in group 0: {count}")
+                
+                if count >= 2:
+                    ref0 = constraint.ReferenceGet(0, 0)  # Group 0, Index 0
+                    ref1 = constraint.ReferenceGet(0, 1)  # Group 0, Index 1
+                    
+                    if debug_mode:
+                        print(f"Ref0: {ref0.Name if ref0 else 'None'} ({ref0.ClassName() if ref0 else 'None'})")
+                        print(f"Ref1: {ref1.Name if ref1 else 'None'} ({ref1.ClassName() if ref1 else 'None'})")
+                    
+                    # If the source (which should be at index 1) ended up at index 0, swap them
+                    if ref0 and ref1:
+                        if ref0 == source and ref1 == target:
+                            # They're backwards! Remove and re-add in correct order
+                            if debug_mode:
+                                print(f"References were reversed! Fixing...")
+                            
+                            # Remove all references first
+                            while constraint.ReferenceGetCount(0) > 0:
+                                constraint.ReferenceRemove(0, 0)
+                            
+                            # Re-add in correct order
+                            constraint.ReferenceAdd(0, target)
+                            constraint.ReferenceAdd(1, source)
+                            
+                            if debug_mode:
+                                print(f"Fixed reference order")
+            
+            # Debug: Verify the final references
+            if debug_mode and ref_count > 0:
+                print(f"Final constraint references:")
+                for i in range(constraint.ReferenceGetCount(0)):
+                    ref = constraint.ReferenceGet(0, i)
+                    if ref:
+                        print(f"  Reference {i}: {ref.Name} ({ref.ClassName()})")
+                    else:
+                        print(f"  Reference {i}: None")
             
             # Name the constraint appropriately
             constraint.Name = f"{source.Name}_to_{target.Name}_{constraint_type}_Constraint"
@@ -2017,6 +2098,74 @@ You can customize these colors with the picker buttons.</p>
         layout.addWidget(close_button)
         
         info_dialog.exec_()
+
+
+    def setup_selection_tracking(self):
+        """Set up tracking for selection order"""
+        # Initialize selection tracking
+        self.selection_order_list = []
+        self.last_selection_state = set()
+        
+        # Set up a timer to monitor selection changes
+        self.selection_monitor_timer = QTimer(self)
+        self.selection_monitor_timer.timeout.connect(self.monitor_selection)
+        self.selection_monitor_timer.setInterval(50)  # Check every 50ms
+        self.selection_monitor_timer.start()
+    
+    def monitor_selection(self):
+        """Monitor selection changes and maintain order"""
+        if not MOBU_AVAILABLE:
+            return
+            
+        # Only track if we're in manual pairing mode
+        if not hasattr(self, 'manual_pairing_cb') or not self.manual_pairing_cb.isChecked():
+            # Clear tracking if not in manual pairing mode
+            if self.selection_order_list:
+                self.selection_order_list = []
+                self.last_selection_state = set()
+            return
+            
+        # Get current selection
+        current_selection = FBModelList()
+        FBGetSelectedModels(current_selection)
+        
+        # Convert to set for comparison
+        current_set = set()
+        for i in range(len(current_selection)):
+            current_set.add(current_selection[i])
+        
+        # Check what changed
+        added = current_set - self.last_selection_state
+        removed = self.last_selection_state - current_set
+        
+        # Handle additions
+        for obj in added:
+            if len(self.selection_order_list) < 2:
+                self.selection_order_list.append(obj)
+            else:
+                # We already have 2 objects, replace the oldest one
+                self.selection_order_list.pop(0)  # Remove first (oldest)
+                self.selection_order_list.append(obj)  # Add new as second
+        
+        # Handle removals
+        for obj in removed:
+            if obj in self.selection_order_list:
+                self.selection_order_list.remove(obj)
+        
+        # Update our tracking state
+        self.last_selection_state = current_set
+        
+        # Update status if we have 2 objects
+        if len(self.selection_order_list) == 2:
+            self.status_label.setText(
+                f"Ready to constrain: {self.selection_order_list[0].Name} → {self.selection_order_list[1].Name}"
+            )
+    
+    def get_ordered_selection(self):
+        """Get the selection in the order it was selected"""
+        if len(self.selection_order_list) == 2:
+            return self.selection_order_list[0], self.selection_order_list[1]
+        return None, None
 
 
 def show_dialog():
