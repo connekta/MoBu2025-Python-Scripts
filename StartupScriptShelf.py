@@ -75,6 +75,47 @@ def load_all_scripts():
 # =============================================================================
 # Custom UI Components
 # =============================================================================
+class HoverButton(QtWidgets.QPushButton):
+    """Custom button that emits signals when hovered"""
+    hover_entered = QtCore.Signal(str)
+    hover_left = QtCore.Signal()
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
+        self._is_icon_mode = False
+        
+    def set_icon_mode(self, is_icon):
+        """Update the icon mode status for hover styling"""
+        self._is_icon_mode = is_icon
+        
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        original_text = self.property("original_text")
+        if original_text:
+            self.hover_entered.emit(original_text)
+        # Add highlight in icon mode
+        if self._is_icon_mode:
+            self.setStyleSheet("""
+                QPushButton {
+                    border: 3px solid #4a90e2;
+                    border-radius: 4px;
+                    background-color: rgba(74, 144, 226, 0.3);
+                    padding: 2px;
+                }
+                QPushButton:pressed {
+                    border: 3px solid #357abd;
+                    background-color: rgba(53, 122, 189, 0.4);
+                }
+            """)
+    
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self.hover_left.emit()
+        # Remove highlight
+        if self._is_icon_mode:
+            self.setStyleSheet("")
+
 class ClickableGroupBox(QtWidgets.QGroupBox):
     clicked = QtCore.Signal()
     def mousePressEvent(self, event):
@@ -781,9 +822,9 @@ class OptionsWindow(QtWidgets.QDialog):
         self.layout.setContentsMargins(10, 10, 10, 10)  # Add margins for better spacing
         self.setLayout(self.layout)
         
-        # Set a reasonable size for the window
-        self.setMinimumSize(600, 200)
-        self.resize(800, 300)
+        # Set a smaller default size for the window
+        self.setMinimumSize(300, 200)
+        self.resize(400, 300)
         
         # Secondary buttons section
         self.secondary_layout = QtWidgets.QHBoxLayout()
@@ -803,8 +844,26 @@ class OptionsWindow(QtWidgets.QDialog):
         small_buttons_layout.addStretch()
         self.layout.addLayout(small_buttons_layout)
         
-        # Time tracking information
-        self.time_group_box = ClickableGroupBox("📁 Time Spent In:")
+        # Time tracking information with click hint
+        self.time_group_box = ClickableGroupBox("📁 Time Spent In: (Click to open Time Tracker)")
+        self.time_group_box.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #666;
+                border-radius: 5px;
+                margin-top: 5px;
+                padding-top: 10px;
+            }
+            QGroupBox:hover {
+                border: 2px solid #4a90e2;
+                background-color: rgba(74, 144, 226, 0.1);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #4a90e2;
+            }
+        """)
         time_group_layout = QtWidgets.QVBoxLayout()
         time_group_layout.setContentsMargins(0, 0, 0, 0)
         self.time_group_box.setLayout(time_group_layout)
@@ -827,7 +886,7 @@ class OptionsWindow(QtWidgets.QDialog):
         self.layout.addWidget(self.time_group_box)
         
         # Set initial size
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(300)
         self.adjustSize()
         
     def on_small_buttons_toggled(self):
@@ -869,6 +928,12 @@ class OptionsWindow(QtWidgets.QDialog):
         # Position the window below the main shelf
         if self.parent_shelf:
             self.move(self.parent_shelf.x(), self.parent_shelf.y() + self.parent_shelf.height() + 5)
+    
+    def closeEvent(self, event):
+        # Reset the toggle button when options window is closed
+        if self.parent_shelf and hasattr(self.parent_shelf, 'toggle_button'):
+            self.parent_shelf.toggle_button.setText("↓")
+        super().closeEvent(event)
 
 # =============================================================================
 # ScriptShelf Class
@@ -900,22 +965,84 @@ class ScriptShelf(QtWidgets.QWidget):
         self.log_timer.timeout.connect(self.on_timer_tick)
         self.log_timer.start(LOG_INTERVAL)
         self.adjustSize()
-        self.resize(self.sizeHint())
+        # Ensure minimum width while respecting content
+        desired_width = max(450, self.sizeHint().width())
+        self.resize(desired_width, self.sizeHint().height())
+        self.setMinimumWidth(450)  # Prevent window from becoming too small
         self.move_to_top_center()
     def setup_ui(self):
         self.main_layout = QtWidgets.QVBoxLayout()
-        self.main_layout.setContentsMargins(5, 5, 5, 5)  # Add some padding
+        self.main_layout.setContentsMargins(5, 0, 5, 5)  # Remove top padding
         self.setLayout(self.main_layout)
+        
+        # Create a horizontal layout for the entire toolbar
+        self.toolbar_layout = QtWidgets.QHBoxLayout()
+        self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.addLayout(self.toolbar_layout)
+        
+        # Add a larger spacer at the beginning
+        self.toolbar_layout.addSpacing(150)
+        
+        # Create the primary button layout (will contain only buttons)
         self.primary_layout = QtWidgets.QHBoxLayout()
         self.primary_layout.setSpacing(2)  # Add small spacing between buttons
         self.primary_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_layout.addLayout(self.primary_layout)
+        self.toolbar_layout.addLayout(self.primary_layout)
+        
+        # Add a small fixed spacer between buttons and toggle
+        self.toolbar_layout.addSpacing(3)
+        
+        # Toggle button with hover effects
         self.toggle_button = QtWidgets.QPushButton("↓")
         self.toggle_button.setFixedSize(20, 20)
         self.toggle_button.setFlat(True)
         self.toggle_button.clicked.connect(self.toggle_options_group)
+        self.toggle_button.setStyleSheet("")
+        self.toggle_button.installEventFilter(self)  # Install event filter for hover
+        self.toolbar_layout.addWidget(self.toggle_button)
+        
+        # Add smaller spacing between toggle and text
+        self.toolbar_layout.addSpacing(5)
+        
+        # Add hover text label with fixed width
+        self.hover_text = QtWidgets.QLabel("")
+        self.hover_text.setFixedHeight(20)
+        self.hover_text.setFixedWidth(200)  # Fixed width prevents resizing
+        self.hover_text.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.hover_text.setStyleSheet("color: #888888;")
+        self.toolbar_layout.addWidget(self.hover_text)
+        
         self.load_all_buttons()
         self.update_all_button_labels()
+    
+    def on_button_hover(self, text):
+        """Handle button hover enter - display text in brackets only when using icons"""
+        if self.shelf_settings.get("use_icons", False):
+            self.hover_text.setText(f"[{text}]")
+    
+    def on_button_hover_left(self):
+        """Handle button hover leave - clear text"""
+        self.hover_text.setText("")
+    
+    def eventFilter(self, obj, event):
+        """Event filter to handle toggle button hover"""
+        if obj == self.toggle_button:
+            if event.type() == QtCore.QEvent.Enter:
+                # On hover enter - show text and style
+                self.hover_text.setText("[Shelf Options]")
+                self.toggle_button.setStyleSheet("""
+                    QPushButton {
+                        color: #4a90e2;
+                        font-weight: bold;
+                        font-size: 16px;
+                    }
+                """)
+            elif event.type() == QtCore.QEvent.Leave:
+                # On hover leave - clear text and style
+                self.hover_text.setText("")
+                self.toggle_button.setStyleSheet("")
+        return super().eventFilter(obj, event)
+    
     def move_to_top_center(self):
         screen = QtWidgets.QApplication.primaryScreen().geometry()
         window_size = self.geometry()
@@ -955,33 +1082,50 @@ class ScriptShelf(QtWidgets.QWidget):
             self.options_window.clear_secondary_buttons()
         for name in self.shelf_settings["primary_order"]:
             if name in all_scripts:
-                btn = QtWidgets.QPushButton(name)
-                btn.setFixedHeight(25)
+                btn = HoverButton(name)
                 btn.clicked.connect(functools.partial(self.run_script, all_scripts[name]))
                 btn.setProperty("original_text", name)
                 btn.setProperty("script_path", all_scripts[name])
                 btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
                 btn.customContextMenuRequested.connect(lambda pos, b=btn: self.show_button_context_menu(b, pos, "primary"))
+                # Connect hover signals
+                btn.hover_entered.connect(self.on_button_hover)
+                btn.hover_left.connect(self.on_button_hover_left)
                 self.primary_buttons.append(btn)
+                # Set proper appearance based on icon mode
+                use_icons = self.shelf_settings.get("use_icons", False)
+                btn.set_icon_mode(use_icons)
+                self.update_button_appearance(btn, False)
                 self.primary_layout.addWidget(btn)
-        self.primary_layout.addStretch()
-        self.primary_layout.addWidget(self.toggle_button)
+        # Don't add stretch here - it causes too much space before arrow
         for name in self.shelf_settings["secondary_order"]:
             if name in all_scripts:
-                btn = QtWidgets.QPushButton(name)
-                btn.setFixedHeight(25)
+                btn = HoverButton(name)
                 btn.clicked.connect(functools.partial(self.run_script, all_scripts[name]))
                 btn.setProperty("original_text", name)
                 btn.setProperty("script_path", all_scripts[name])
                 btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
                 btn.customContextMenuRequested.connect(lambda pos, b=btn: self.show_button_context_menu(b, pos, "secondary"))
+                # Connect hover signals
+                btn.hover_entered.connect(self.on_button_hover)
+                btn.hover_left.connect(self.on_button_hover_left)
                 self.secondary_buttons.append(btn)
+                # Set proper appearance based on icon mode
+                use_icons = self.shelf_settings.get("use_icons", False)
+                btn.set_icon_mode(use_icons)
+                self.update_button_appearance(btn, True)
                 # Add to options window if it exists
                 if self.options_window:
                     self.options_window.add_secondary_button(btn)
         if self.options_window:
             self.options_window.secondary_layout.addStretch()
         self.save_shelf_settings()
+        
+        # Force layout update to fix spacing
+        self.primary_layout.invalidate()
+        self.toolbar_layout.invalidate()
+        self.main_layout.invalidate()
+        self.adjustSize()
     def open_script_in_explorer(self, script_path):
         """Open the script's folder in Windows Explorer"""
         if script_path:
@@ -1046,43 +1190,158 @@ class ScriptShelf(QtWidgets.QWidget):
     def transfer_button(self, btn, from_group, to_group):
         script_name = btn.property("original_text")
         self.shelf_settings["script_assignments"][script_name] = to_group
+        
+        # Update the order lists
         if from_group == "primary":
             if script_name in self.shelf_settings["primary_order"]:
                 self.shelf_settings["primary_order"].remove(script_name)
             if script_name not in self.shelf_settings["secondary_order"]:
                 self.shelf_settings["secondary_order"].append(script_name)
-        else:
+                
+            # Remove button from primary and add to secondary  
+            self.primary_layout.removeWidget(btn)
+            self.primary_buttons.remove(btn)
+            self.secondary_buttons.append(btn)
+            
+            # Disconnect old context menu and connect new one
+            btn.customContextMenuRequested.disconnect()
+            btn.customContextMenuRequested.connect(lambda pos, b=btn: self.show_button_context_menu(b, pos, "secondary"))
+            
+            # Ensure icon and text are properly set
+            self.update_button_appearance(btn, True)  # Update for the secondary group
+            
+        else:  # from secondary to primary
             if script_name in self.shelf_settings["secondary_order"]:
                 self.shelf_settings["secondary_order"].remove(script_name)
             if script_name not in self.shelf_settings["primary_order"]:
                 self.shelf_settings["primary_order"].append(script_name)
+                
+            # Remove button from secondary and add to primary
+            if self.options_window:
+                self.options_window.secondary_layout.removeWidget(btn)
+            self.secondary_buttons.remove(btn)
+            self.primary_buttons.append(btn)
+            self.primary_layout.addWidget(btn)
+            
+            # Disconnect old context menu and connect new one
+            btn.customContextMenuRequested.disconnect()
+            btn.customContextMenuRequested.connect(lambda pos, b=btn: self.show_button_context_menu(b, pos, "primary"))
+            
+            # Ensure icon and text are properly set
+            self.update_button_appearance(btn, False)  # Update for the primary group
+        
         self.save_shelf_settings()
-        self.load_all_buttons()
-        self.update_all_button_labels()
+        
+        # Update button order in their respective groups
+        self.update_buttons_order("primary")
+        self.update_buttons_order("secondary")
+        
+        # If options window is open, refresh its display
+        if self.options_window and self.options_window.isVisible():
+            self.populate_options_window_buttons()
+        
+        # Force complete layout refresh
+        self.primary_layout.invalidate()
+        self.toolbar_layout.invalidate()
+        self.main_layout.invalidate()
+        self.adjustSize()
+        
+        # Final layout adjustment
+        desired_width = max(450, self.sizeHint().width())
+        self.resize(desired_width, self.sizeHint().height())
+    def update_button_appearance(self, btn, is_secondary=False):
+        """Update a single button's appearance based on icon mode setting"""
+        use_icons = self.shelf_settings.get("use_icons", False)
+        new_size = int(ICON_BASE_SIZE * ICON_SIZE_SCALE)  # Use scaled size like in original
+        
+        # Get the icon folder from settings or use default
+        icon_folder = self.shelf_settings.get("icon_folder", r"C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\PythonScriptIcons")
+        
+        original_text = btn.property("original_text")
+        btn.set_icon_mode(use_icons)  # Set icon mode for hover styling
+        
+        if use_icons:
+            icon_path = os.path.join(icon_folder, original_text + ".png")
+            if os.path.exists(icon_path):
+                btn.setIcon(QtGui.QIcon(icon_path))
+                btn.setText("")
+                btn.setIconSize(QtCore.QSize(new_size - 6, new_size - 6))  # Smaller to show border
+            else:
+                btn.setIcon(QtGui.QIcon())
+                btn.setText(original_text)
+                
+            btn.setFixedSize(new_size, new_size)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        else:
+            btn.setIcon(QtGui.QIcon())
+            btn.setText(original_text)
+            
+            btn.setFixedHeight(25)
+            btn.setMinimumWidth(0)
+            btn.setMaximumWidth(16777215)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+    
     def update_buttons_order(self, group):
         if group == "primary":
+            # Clean up order list to only include existing buttons
+            existing_names = [btn.property("original_text") for btn in self.primary_buttons]
+            self.shelf_settings["primary_order"] = [name for name in self.shelf_settings["primary_order"] if name in existing_names]
+            
+            # Add any new buttons not in the order to the end
+            for name in existing_names:
+                if name not in self.shelf_settings["primary_order"]:
+                    self.shelf_settings["primary_order"].append(name)
+            
             order = self.shelf_settings["primary_order"]
             self.primary_buttons.sort(key=lambda b: order.index(b.property("original_text")) if b.property("original_text") in order else 9999)
-            while self.primary_layout.count() > 0:
-                item = self.primary_layout.takeAt(0)
-                if item.widget():
-                    item.widget().setParent(None)
+            
+            # Remove buttons from layout without affecting their properties
+            for btn in self.primary_buttons:
+                self.primary_layout.removeWidget(btn)
+            
+            # Re-add buttons in new order
             for btn in self.primary_buttons:
                 self.primary_layout.addWidget(btn)
-            self.primary_layout.addStretch()
-            self.primary_layout.addWidget(self.toggle_button)
+            # Don't add stretch here - it causes too much space before arrow
         else:
+            # Clean up order list to only include existing buttons
+            existing_names = [btn.property("original_text") for btn in self.secondary_buttons]
+            self.shelf_settings["secondary_order"] = [name for name in self.shelf_settings["secondary_order"] if name in existing_names]
+            
+            # Add any new buttons not in the order to the end
+            for name in existing_names:
+                if name not in self.shelf_settings["secondary_order"]:
+                    self.shelf_settings["secondary_order"].append(name)
+            
             order = self.shelf_settings["secondary_order"]
             self.secondary_buttons.sort(key=lambda b: order.index(b.property("original_text")) if b.property("original_text") in order else 9999)
-            while self.secondary_layout.count() > 0:
-                item = self.secondary_layout.takeAt(0)
-                if item.widget():
-                    item.widget().setParent(None)
-            for btn in self.secondary_buttons:
-                self.secondary_layout.addWidget(btn)
-            self.secondary_layout.addStretch()
+            
+            # Secondary buttons are in the options window
+            if self.options_window:
+                # Clear the entire layout first to remove stretch
+                while self.options_window.secondary_layout.count():
+                    item = self.options_window.secondary_layout.takeAt(0)
+                    if item.widget() and item.widget() in self.secondary_buttons:
+                        # Don't delete the button widgets, just remove from layout
+                        pass
+                
+                # Re-add buttons in new order
+                for btn in self.secondary_buttons:
+                    self.options_window.secondary_layout.addWidget(btn)
+                
+                # Add stretch at the end
+                self.options_window.secondary_layout.addStretch()
+            
+        # Save the cleaned up order lists
+        self.save_shelf_settings()
+        
+        # Refresh button labels to ensure proper sizing
+        self.update_all_button_labels()
+        
         self.adjustSize()
-        self.resize(self.sizeHint())
+        # Maintain consistent window width  
+        desired_width = max(450, self.sizeHint().width())
+        self.resize(desired_width, self.sizeHint().height())
     def toggle_options_group(self):
         if not self.options_window:
             self.options_window = OptionsWindow(self)
@@ -1092,6 +1351,8 @@ class ScriptShelf(QtWidgets.QWidget):
             self.options_window.update_time_labels()  # Update time labels
             # Clear and repopulate secondary buttons in the options window
             self.populate_options_window_buttons()
+            # Force update of all button appearances after showing the window
+            self.update_all_button_labels()
             self.options_window.show()
             self.toggle_button.setText("→")
         else:
@@ -1099,101 +1360,65 @@ class ScriptShelf(QtWidgets.QWidget):
             self.toggle_button.setText("↓")
     
     def populate_options_window_buttons(self):
-        """Create copies of secondary buttons for the options window"""
+        """Populate options window with existing secondary buttons"""
         if not self.options_window:
             return
             
-        # Clear existing buttons in options window
-        self.options_window.clear_secondary_buttons()
+        # Clear existing layout including stretch
+        while self.options_window.secondary_layout.count():
+            item = self.options_window.secondary_layout.takeAt(0)
+            # This will remove both widgets and stretch items
         
-        # Get all scripts
-        all_scripts = load_all_scripts()
+        # Sort secondary buttons according to saved order
+        order = self.shelf_settings["secondary_order"]
+        self.secondary_buttons.sort(key=lambda b: order.index(b.property("original_text")) if b.property("original_text") in order else 9999)
         
-        # Create new buttons for the options window based on secondary order
-        for name in self.shelf_settings["secondary_order"]:
-            if name in all_scripts:
-                btn = QtWidgets.QPushButton(name)
-                btn.setFixedHeight(25)
-                btn.clicked.connect(functools.partial(self.run_script, all_scripts[name]))
-                btn.setProperty("original_text", name)
-                btn.setProperty("script_path", all_scripts[name])
-                btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-                btn.customContextMenuRequested.connect(lambda pos, b=btn: self.show_button_context_menu(b, pos, "secondary"))
-                self.options_window.add_secondary_button(btn)
+        # Get current icon mode settings from checkbox if available
+        use_icons = self.shelf_settings.get("use_icons", False)
+        if hasattr(self.options_window, 'checkbox'):
+            # Make sure checkbox matches the shelf settings
+            self.options_window.checkbox.setChecked(use_icons)
+        
+        # Add existing secondary buttons to the options window
+        for btn in self.secondary_buttons:
+            btn.setParent(self.options_window)  # Ensure proper parent
+            self.options_window.secondary_layout.addWidget(btn)
+            # Ensure button has correct icon mode flag
+            btn.set_icon_mode(use_icons)
+            # Update button appearance based on current mode
+            self.update_button_appearance(btn, True)
         
         self.options_window.secondary_layout.addStretch()
+        
+        # Force layout update
+        self.options_window.secondary_layout.invalidate()
+        self.options_window.secondary_layout.update()
         
     def update_all_button_labels(self):
         use_icons = self.shelf_settings.get("use_icons", False)
         if self.options_window and hasattr(self.options_window, 'checkbox'):
             use_icons = self.options_window.checkbox.isChecked()
-        icon_folder = r"C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\PythonScriptIcons"
-        new_size = int(ICON_BASE_SIZE * ICON_SIZE_SCALE)
+            # Ensure shelf settings match checkbox state
+            self.shelf_settings["use_icons"] = use_icons
         
-        # Update options window buttons if it exists
-        if self.options_window:
-            # Get all buttons from the options window secondary layout
-            for i in range(self.options_window.secondary_layout.count()):
-                item = self.options_window.secondary_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), QtWidgets.QPushButton):
-                    btn = item.widget()
-                    original_text = btn.property("original_text")
-                    if original_text:  # Skip if it's not one of our buttons
-                        if use_icons:
-                            icon_path = os.path.join(icon_folder, original_text + ".png")
-                            if os.path.exists(icon_path):
-                                btn.setIcon(QtGui.QIcon(icon_path))
-                                btn.setText("")
-                                btn.setIconSize(QtCore.QSize(new_size, new_size))
-                            else:
-                                btn.setIcon(QtGui.QIcon())
-                                btn.setText(original_text)
-                            btn.setFixedSize(new_size, new_size)
-                        else:
-                            btn.setIcon(QtGui.QIcon())
-                            btn.setText(original_text)
-                            btn.setFixedHeight(25)
-                            btn.setMinimumWidth(0)
-                            btn.setMaximumWidth(16777215)
-        
+        # Update all primary buttons
         for btn in self.primary_buttons:
-            original_text = btn.property("original_text")
-            if use_icons:
-                icon_path = os.path.join(icon_folder, original_text + ".png")
-                if os.path.exists(icon_path):
-                    btn.setIcon(QtGui.QIcon(icon_path))
-                    btn.setText("")
-                    btn.setIconSize(QtCore.QSize(new_size, new_size))
-                else:
-                    btn.setIcon(QtGui.QIcon())
-                    btn.setText(original_text)
-                btn.setFixedSize(new_size, new_size)
-            else:
-                btn.setIcon(QtGui.QIcon())
-                btn.setText(original_text)
-                btn.setFixedHeight(25)
-                btn.setMinimumWidth(0)
-                btn.setMaximumWidth(16777215)
+            btn.set_icon_mode(use_icons)
+            self.update_button_appearance(btn, False)
+        
+        # Update all secondary buttons
         for btn in self.secondary_buttons:
-            original_text = btn.property("original_text")
-            if use_icons:
-                icon_path = os.path.join(icon_folder, original_text + ".png")
-                if os.path.exists(icon_path):
-                    btn.setIcon(QtGui.QIcon(icon_path))
-                    btn.setText("")
-                    btn.setIconSize(QtCore.QSize(new_size, new_size))
-                else:
-                    btn.setIcon(QtGui.QIcon())
-                    btn.setText(original_text)
-                btn.setFixedSize(new_size, new_size)
-            else:
-                btn.setIcon(QtGui.QIcon())
-                btn.setText(original_text)
-                btn.setFixedHeight(25)
-                btn.setMinimumWidth(0)
-                btn.setMaximumWidth(16777215)
+            btn.set_icon_mode(use_icons)
+            self.update_button_appearance(btn, True)
+        
+        # Force the primary layout to recalculate its size
+        self.primary_layout.invalidate()
+        self.primary_layout.update()
+        
         self.adjustSize()
-        self.resize(self.sizeHint())
+        # Maintain consistent window width  
+        desired_width = max(450, self.sizeHint().width())
+        self.resize(desired_width, self.sizeHint().height())
     def on_timer_tick(self):
         self.time_tracker.log_time(LOG_INTERVAL // 1000)
         self.update_time_labels()
