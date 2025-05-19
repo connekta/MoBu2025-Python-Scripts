@@ -23,6 +23,8 @@ This repository contains my custom Python scripts for Autodesk MotionBuilder 202
 **Move this to new folder if you want it to run on startup**
 Adding all scripts within the folder "PythonCustomScripts" to the top center of Motionbuilder, next to the help-dropdown menu. Also has options to show Name or icons, and it also has an extra window that can be opened with additional buttons from other folders or manually moved there by right-clicking. Also has a Time tracker per file open, with statistics per day and so on if clicked.
 
+It looks for icons with the same name as the script in the folder "C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\**PythonScriptIcons**"
+
 - **Characterize.py**
 
 Oneclick set up HIK rig + characterize it, based on HIK templates of joint to rig names found in: C:\Users\[USER]\AppData\Roaming\Autodesk\HIKCharacterizationTool6\template\HIK.xml - Either change the values here or add your own template and link it.
