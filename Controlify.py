@@ -24,7 +24,7 @@ try:
         QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
         QRadioButton, QPushButton, QMessageBox, QLabel, QSpinBox,
         QComboBox, QColorDialog, QDoubleSpinBox, QGridLayout, QCheckBox,
-        QSizePolicy, QTextEdit
+        QSizePolicy, QTextEdit, QWidget
     )
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QColor
@@ -94,6 +94,7 @@ class ControlifyDialog(QDialog):
         # Set window properties
         self.setWindowTitle("Controlify - Control Rig Creator")
         self.setMinimumWidth(450)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         
         # Try the approach that works in Maya - simply use default dialog behavior
         # with proper parent. QDialog should automatically stay on top of its parent.
@@ -120,6 +121,18 @@ class ControlifyDialog(QDialog):
         
         # Add preview checkbox at the top
         self.create_preview_checkbox(main_layout)
+        
+        # Constrain object to object checkbox (moved above constraint type)
+        self.manual_pairing_cb = QCheckBox("Constrain object to object")
+        self.manual_pairing_cb.setToolTip("Create constraints directly between two selected objects (First = Source, Second = Target)")
+        self.manual_pairing_cb.setStyleSheet("""
+            QCheckBox:checked {
+                font-weight: bold;
+                color: #00AA00;
+            }
+        """)
+        self.manual_pairing_cb.toggled.connect(self.on_manual_pairing_toggled)
+        main_layout.addWidget(self.manual_pairing_cb)
         
         # Add constraint type selection
         self.create_constraint_group(main_layout)
@@ -151,6 +164,20 @@ class ControlifyDialog(QDialog):
         self.status_label = QLabel("Select objects and press Controlify")
         self.status_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.status_label)
+        
+        # Temporary Constraint button (hidden by default)
+        temp_layout = QHBoxLayout()
+        temp_layout.addStretch()
+        
+        self.temp_constraint_button = QPushButton("Temporary Constraint")
+        self.temp_constraint_button.clicked.connect(self.create_temporary_constraint)
+        self.temp_constraint_button.setVisible(False)
+        self.temp_constraint_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.temp_constraint_button.setMaximumHeight(30)  # Fixed height
+        temp_layout.addWidget(self.temp_constraint_button)
+        
+        temp_layout.addStretch()
+        main_layout.addLayout(temp_layout)
         
         # Create custom constraints folder on initialization
         self.ensure_custom_constraints_folder_exists()
@@ -234,9 +261,35 @@ class ControlifyDialog(QDialog):
             pass
             self.custom_folder = None
     
+    def get_collapsible_group_style(self):
+        """Get the style for collapsible group boxes"""
+        return """
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+                margin-top: 6px;
+                padding-top: 6px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QGroupBox:hover::title {
+                color: #cccccc;
+            }
+        """
+    
     def create_constraint_group(self, parent_layout):
         """Create the constraint type selection group"""
-        group_box = QGroupBox("Constraint Type")
+        # Create collapsible group
+        group_box = QGroupBox("▼ Constraint Type")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_constraint_group_clicked()
+        
+        self.constraint_group = group_box
+        self.constraint_group_expanded = True
         group_layout = QGridLayout()
         
         # Create radio buttons
@@ -254,36 +307,36 @@ class ControlifyDialog(QDialog):
         group_layout.addWidget(self.rb_rotation, 0, 1)   # Row 0, Col 1
         group_layout.addWidget(self.rb_position, 1, 1)   # Row 1, Col 1
         
+        # Create container widget to hold the radio buttons
+        radio_container = QWidget()
+        radio_container.setLayout(group_layout)
+        self.constraint_radio_container = radio_container
+        
+        # Main group layout
+        main_group_layout = QVBoxLayout()
+        main_group_layout.addWidget(radio_container)
+        
         # Set group layout
-        group_box.setLayout(group_layout)
+        group_box.setLayout(main_group_layout)
         
         # Add to parent layout
         parent_layout.addWidget(group_box)
-        
-        # Constrain object to object checkbox
-        self.manual_pairing_cb = QCheckBox("Constrain object to object")
-        self.manual_pairing_cb.setToolTip("Create constraints directly between two selected objects (First = Source, Second = Target)")
-        self.manual_pairing_cb.setStyleSheet("""
-            QCheckBox:checked {
-                font-weight: bold;
-                color: #00AA00;
-            }
-        """)
-        parent_layout.addWidget(self.manual_pairing_cb)
         
         # Connect the radio buttons to the preview update function
         self.rb_parent.toggled.connect(self.on_settings_changed)
         self.rb_rotation.toggled.connect(self.on_settings_changed)
         self.rb_position.toggled.connect(self.on_settings_changed)
         self.rb_aim.toggled.connect(self.on_settings_changed)
-        
-        # Connect manual pairing checkbox to handle UI changes
-        self.manual_pairing_cb.toggled.connect(self.on_manual_pairing_toggled)
     
     def create_offset_group(self, parent_layout):
         """Create the controller offset settings group"""
-        group_box = QGroupBox("Controller Offset")
+        # Create collapsible group (collapsed by default)
+        group_box = QGroupBox("► Controller Offset")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_controller_offset_clicked()
+        
         self.controller_offset_group = group_box  # Store reference
+        self.controller_offset_expanded = False
         group_layout = QGridLayout()
         
         # Translation Offset
@@ -367,7 +420,21 @@ class ControlifyDialog(QDialog):
         manual_offset_layout.addStretch()
         group_layout.addLayout(manual_offset_layout, 2, 0, 1, 2)
         
-        group_box.setLayout(group_layout)
+        # Create container widget to hold all controls
+        controls_container = QWidget()
+        controls_container.setLayout(group_layout)
+        self.controller_offset_container = controls_container
+        
+        # Main group layout
+        main_group_layout = QVBoxLayout()
+        main_group_layout.addWidget(controls_container)
+        
+        group_box.setLayout(main_group_layout)
+        
+        # Set initial collapsed state
+        controls_container.setVisible(False)
+        group_box.setFixedHeight(30)
+        
         parent_layout.addWidget(group_box)
         
         # Initialize manual offset state
@@ -383,8 +450,13 @@ class ControlifyDialog(QDialog):
     
     def create_marker_appearance_group(self, parent_layout):
         """Create the marker appearance settings group"""
-        group_box = QGroupBox("Marker Appearance")
+        # Create collapsible group (collapsed by default)
+        group_box = QGroupBox("► Marker Appearance")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_marker_appearance_clicked()
+        
         self.marker_appearance_group = group_box  # Store reference
+        self.marker_appearance_expanded = False
         group_layout = QGridLayout()
         
         # Label for marker look dropdown
@@ -488,8 +560,21 @@ class ControlifyDialog(QDialog):
         # Add buttons layout to grid at position (3, 1) - same row as checkbox
         group_layout.addLayout(lr_buttons_layout, 3, 1)
         
+        # Create container widget to hold all controls
+        controls_container = QWidget()
+        controls_container.setLayout(group_layout)
+        self.marker_appearance_container = controls_container
+        
+        # Main group layout
+        main_group_layout = QVBoxLayout()
+        main_group_layout.addWidget(controls_container)
+        
         # Set the group layout
-        group_box.setLayout(group_layout)
+        group_box.setLayout(main_group_layout)
+        
+        # Set initial collapsed state
+        controls_container.setVisible(False)
+        group_box.setFixedHeight(30)
         
         # Add to parent layout
         parent_layout.addWidget(group_box)
@@ -563,12 +648,16 @@ class ControlifyDialog(QDialog):
         if checked:
             # Store preview state before disabling
             self.preview_was_enabled = self.preview_enabled
+            # Store group states
+            self.marker_appearance_was_expanded = self.marker_appearance_expanded
+            self.controller_offset_was_expanded = self.controller_offset_expanded
+            
             # Disable preview and gray it out
             if self.preview_enabled:
                 self.preview_checkbox.setChecked(False)
             self.preview_checkbox.setEnabled(False)
             
-            # Hide marker appearance and controller offset groups
+            # Hide marker appearance and controller offset groups completely
             self.marker_appearance_group.setVisible(False)
             self.controller_offset_group.setVisible(False)
             
@@ -578,6 +667,9 @@ class ControlifyDialog(QDialog):
             
             # Update status label
             self.status_label.setText("Constrain object to object: Select 2 objects (First = Source, Second = Target)")
+            
+            # Adjust window size
+            QTimer.singleShot(10, self.adjustSize)
         else:
             # Re-enable preview checkbox
             self.preview_checkbox.setEnabled(True)
@@ -585,12 +677,91 @@ class ControlifyDialog(QDialog):
             if hasattr(self, 'preview_was_enabled') and self.preview_was_enabled:
                 self.preview_checkbox.setChecked(True)
             
-            # Show marker appearance and controller offset groups
+            # Show marker appearance and controller offset groups with restored state
             self.marker_appearance_group.setVisible(True)
             self.controller_offset_group.setVisible(True)
             
+            # Restore expanded states
+            if hasattr(self, 'marker_appearance_was_expanded'):
+                self.marker_appearance_expanded = self.marker_appearance_was_expanded
+                self.marker_appearance_container.setVisible(self.marker_appearance_expanded)
+                if not self.marker_appearance_expanded:
+                    self.marker_appearance_group.setFixedHeight(30)
+                
+            if hasattr(self, 'controller_offset_was_expanded'):
+                self.controller_offset_expanded = self.controller_offset_was_expanded
+                self.controller_offset_container.setVisible(self.controller_offset_expanded)
+                if not self.controller_offset_expanded:
+                    self.controller_offset_group.setFixedHeight(30)
+            
             # Reset status label
             self.status_label.setText("Select objects and press Controlify")
+            
+            # Adjust window size
+            QTimer.singleShot(10, self.adjustSize)
+    
+    def on_constraint_group_clicked(self):
+        """Handle constraint group collapse/expand"""
+        self.constraint_group_expanded = not self.constraint_group_expanded
+        self.constraint_radio_container.setVisible(self.constraint_group_expanded)
+        
+        # Update arrow indicator
+        title = self.constraint_group.title()
+        if self.constraint_group_expanded:
+            self.constraint_group.setTitle(title.replace("►", "▼"))
+        else:
+            self.constraint_group.setTitle(title.replace("▼", "►"))
+        
+        if not self.constraint_group_expanded:
+            self.constraint_group.setFixedHeight(30)
+        else:
+            self.constraint_group.setMaximumHeight(16777215)
+            self.constraint_group.setMinimumHeight(0)
+        
+        # Adjust window size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def on_marker_appearance_clicked(self):
+        """Handle marker appearance group collapse/expand"""
+        self.marker_appearance_expanded = not self.marker_appearance_expanded
+        self.marker_appearance_container.setVisible(self.marker_appearance_expanded)
+        
+        # Update arrow indicator
+        title = self.marker_appearance_group.title()
+        if self.marker_appearance_expanded:
+            self.marker_appearance_group.setTitle(title.replace("►", "▼"))
+        else:
+            self.marker_appearance_group.setTitle(title.replace("▼", "►"))
+        
+        if not self.marker_appearance_expanded:
+            self.marker_appearance_group.setFixedHeight(30)
+        else:
+            self.marker_appearance_group.setMaximumHeight(16777215)
+            self.marker_appearance_group.setMinimumHeight(0)
+        
+        # Adjust window size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def on_controller_offset_clicked(self):
+        """Handle controller offset group collapse/expand"""
+        self.controller_offset_expanded = not self.controller_offset_expanded
+        self.controller_offset_container.setVisible(self.controller_offset_expanded)
+        
+        # Update arrow indicator
+        title = self.controller_offset_group.title()
+        if self.controller_offset_expanded:
+            self.controller_offset_group.setTitle(title.replace("►", "▼"))
+        else:
+            self.controller_offset_group.setTitle(title.replace("▼", "►"))
+        
+        if not self.controller_offset_expanded:
+            self.controller_offset_group.setFixedHeight(30)
+        else:
+            self.controller_offset_group.setMaximumHeight(16777215)
+            self.controller_offset_group.setMinimumHeight(0)
+        
+        # Adjust window size
+        QTimer.singleShot(10, self.adjustSize)
     
     def on_marker_size_changed(self, value):
         """Handle marker size changes, especially during manual offset mode"""
@@ -1482,6 +1653,143 @@ class ControlifyDialog(QDialog):
             pass
             return None
     
+    def create_temporary_constraint(self):
+        """Create or delete a temporary parent constraint for the selected object"""
+        try:
+            # Get selected object
+            selected_models = FBModelList()
+            FBGetSelectedModels(selected_models)
+            
+            if len(selected_models) != 1:
+                QMessageBox.warning(self, "Selection Error", "Please select exactly one object.")
+                return
+            
+            target_obj = selected_models[0]
+            
+            # Check if this is a delete operation
+            if self.temp_constraint_button.text() == "Delete Temp Constraint":
+                # Use the stored references to find the constraint
+                constraint_to_delete = None
+                
+                # Find the constraint to delete - check both object and null
+                for constraint in FBSystem().Scene.Constraints:
+                    if "Temporary_Parent_Constraint" in constraint.Name:
+                        ref_count_0 = constraint.ReferenceGetCount(0) if constraint.ReferenceGroupGetCount() > 0 else 0
+                        ref_count_1 = constraint.ReferenceGetCount(1) if constraint.ReferenceGroupGetCount() > 1 else 0
+                        
+                        # Check if this constraint involves our stored object or null
+                        constraint_found = False
+                        
+                        # Check first reference group (constrained object)
+                        for j in range(ref_count_0):
+                            ref_obj = constraint.ReferenceGet(0, j)
+                            if ref_obj and (ref_obj == target_obj or 
+                                          (hasattr(self, 'temp_constraint_object') and ref_obj == self.temp_constraint_object)):
+                                constraint_found = True
+                                break
+                        
+                        # Check second reference group (temp null)
+                        if not constraint_found:
+                            for k in range(ref_count_1):
+                                ref_obj = constraint.ReferenceGet(1, k)
+                                if ref_obj and (ref_obj == target_obj or
+                                              (hasattr(self, 'temp_constraint_null') and ref_obj == self.temp_constraint_null)):
+                                    constraint_found = True
+                                    break
+                        
+                        if constraint_found:
+                            constraint_to_delete = constraint
+                            break
+                
+                if constraint_to_delete:
+                    # Get the name for status message before deletion
+                    object_name = target_obj.Name
+                    if hasattr(self, 'temp_constraint_object') and self.temp_constraint_object:
+                        object_name = self.temp_constraint_object.Name
+                    
+                    # Deselect everything first to avoid unbound wrapper error
+                    for component in FBSystem().Scene.Components:
+                        component.Selected = False
+                    
+                    # Delete the constraint
+                    constraint_to_delete.FBDelete()
+                    
+                    # Delete the temp null
+                    if hasattr(self, 'temp_constraint_null') and self.temp_constraint_null:
+                        self.temp_constraint_null.FBDelete()
+                    
+                    self.status_label.setText(f"Deleted temporary constraint for {object_name}")
+                else:
+                    self.status_label.setText("No temporary constraint found to delete")
+                return
+            
+            # Create operation - Check if object is already constrained
+            for constraint in FBSystem().Scene.Constraints:
+                ref_group_count = constraint.ReferenceGroupGetCount()
+                is_constrained = False
+                
+                if ref_group_count > 0:
+                    ref_count = constraint.ReferenceGetCount(0)
+                    for j in range(ref_count):
+                        ref_obj = constraint.ReferenceGet(0, j)
+                        if ref_obj and ref_obj == target_obj:
+                            is_constrained = True
+                            break
+                
+                if is_constrained and "_Parent_Child_Constraint" in constraint.Name and "Temporary" not in constraint.Name:
+                    QMessageBox.warning(self, "Constraint Error", 
+                                      "Object already has a parent constraint. Cannot create temporary constraint.")
+                    return
+            
+            # Create null at object's position
+            null_name = f"{target_obj.Name}_TEMP_NULL"
+            temp_null = FBModelNull(null_name)
+            temp_null.Show = True
+            temp_null.Size = 1000  # Set size to 1000 as requested
+            
+            # Copy the transform of the target object to the null
+            target_matrix = FBMatrix()
+            target_obj.GetMatrix(target_matrix)
+            temp_null.SetMatrix(target_matrix)
+            
+            # Create parent constraint with null as parent and object as child
+            constraint_manager = FBConstraintManager()
+            constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+            
+            if constraint:
+                # Name the constraint appropriately
+                constraint.Name = f"{null_name}_to_{target_obj.Name}_Temporary_Parent_Constraint"
+                
+                # Add references (object is child, null is parent)
+                constraint.ReferenceAdd(0, target_obj)  # Child (constrained)
+                constraint.ReferenceAdd(1, temp_null)   # Parent (source)
+                
+                # Snap to maintain current offset
+                constraint.Snap()
+                constraint.Active = True
+                
+                # Lock the constraint
+                lock_prop = constraint.PropertyList.Find('Lock')
+                if lock_prop:
+                    lock_prop.Data = True
+                
+                # Move constraint to custom folder
+                if constraint and self.custom_folder:
+                    self.add_constraint_to_folder(constraint)
+                
+                # Clear selection and select the new null
+                for component in FBSystem().Scene.Components:
+                    component.Selected = False
+                temp_null.Selected = True
+                
+                self.status_label.setText(f"Created temporary constraint for {target_obj.Name}")
+            else:
+                self.status_label.setText("Failed to create temporary constraint")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+            traceback.print_exc()
+    
     def check_selection(self):
         """Check if a single marker is selected"""
         if self.manual_offset_active:
@@ -1555,10 +1863,73 @@ class ControlifyDialog(QDialog):
             # Check if this is one of our created markers (has _CTRL suffix)
             if "_CTRL" in marker.Name:
                 self.manual_offset_button.setVisible(True)
-                # Don't update radio buttons for manual offset markers
-                return
         else:
             self.manual_offset_button.setVisible(False)
+        
+        # Show temporary constraint button for single object selection (including markers)
+        if len(selected_models) == 1:
+            obj = selected_models[0]
+            # Check if this object already has a temporary constraint
+            has_temp_constraint = False
+            temp_null = None
+            constrained_object = None
+            
+            # Check if selected object is a temp null
+            if obj.ClassName() == "FBModelNull" and "_TEMP_NULL" in obj.Name:
+                # Find the constraint that uses this temp null
+                for constraint in FBSystem().Scene.Constraints:
+                    if "Temporary_Parent_Constraint" in constraint.Name:
+                        # Check if this temp null is the parent in the constraint
+                        if constraint.ReferenceGroupGetCount() > 1:
+                            ref_count_1 = constraint.ReferenceGetCount(1)
+                            for k in range(ref_count_1):
+                                ref_obj_1 = constraint.ReferenceGet(1, k)
+                                if ref_obj_1 == obj:
+                                    temp_null = obj
+                                    has_temp_constraint = True
+                                    # Find the constrained object
+                                    ref_count_0 = constraint.ReferenceGetCount(0)
+                                    for j in range(ref_count_0):
+                                        constrained_object = constraint.ReferenceGet(0, j)
+                                        if constrained_object:
+                                            break
+                                    break
+                    if has_temp_constraint:
+                        break
+            else:
+                # Normal object selection - check if it has a temp constraint
+                for constraint in FBSystem().Scene.Constraints:
+                    if "Temporary_Parent_Constraint" in constraint.Name:
+                        # Check if this constraint is for our selected object
+                        ref_count = constraint.ReferenceGetCount(0) if constraint.ReferenceGroupGetCount() > 0 else 0
+                        for j in range(ref_count):
+                            ref_obj = constraint.ReferenceGet(0, j)
+                            if ref_obj == obj:
+                                has_temp_constraint = True
+                                constrained_object = obj
+                                # Find the associated temp null
+                                if constraint.ReferenceGroupGetCount() > 1:
+                                    ref_count_1 = constraint.ReferenceGetCount(1)
+                                    for k in range(ref_count_1):
+                                        ref_obj_1 = constraint.ReferenceGet(1, k)
+                                        if ref_obj_1 and "_TEMP_NULL" in ref_obj_1.Name:
+                                            temp_null = ref_obj_1
+                                            break
+                                break
+                    if has_temp_constraint:
+                        break
+            
+            self.temp_constraint_button.setVisible(True)
+            if has_temp_constraint:
+                self.temp_constraint_button.setText("Delete Temp Constraint")
+                self.temp_constraint_null = temp_null  # Store reference for deletion
+                self.temp_constraint_object = constrained_object  # Store reference to constrained object
+            else:
+                self.temp_constraint_button.setText("Temporary Constraint")
+                self.temp_constraint_null = None
+                self.temp_constraint_object = None
+        else:
+            self.temp_constraint_button.setVisible(False)
             
         # Update radio button states based on selected objects' constraints
         self.update_constraint_radio_states(selected_models)
