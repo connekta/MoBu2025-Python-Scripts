@@ -15,10 +15,12 @@ import json
 import sys
 import tempfile
 import traceback
+import math
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QCheckBox, QLineEdit, QGroupBox, 
                              QScrollArea, QProgressBar, QFileDialog, QFrame, QMessageBox,
-                             QSizePolicy, QToolButton, QGridLayout, QDialog, QComboBox)
+                             QSizePolicy, QToolButton, QGridLayout, QDialog, QComboBox, QTextEdit, 
+                             QStyle)
 
 # Try to import FBX SDK for axis conversion
 try:
@@ -34,7 +36,7 @@ from PySide6.QtGui import QFont, QIcon, QColor, QDoubleValidator
 
 from pyfbsdk import FBApplication, FBSystem, FBMessageBox, FBModelList, FBModel, FBGetSelectedModels, FBFindModelByLabelName, FBTime, FBAnimationNode
 from pyfbsdk import FBModelNull, FBVector3d, FBConstraintManager, FBPlotOptions, FBRotationFilter, FBBeginChangeAllModels, FBEndChangeAllModels
-from pyfbsdk import FBPlayerControl, FBFbxOptions, FBUndoManager, FBConstraint  # Added FBPlayerControl, FBFbxOptions, FBUndoManager, and FBConstraint to imports
+from pyfbsdk import FBPlayerControl, FBFbxOptions, FBUndoManager, FBConstraint, FBModelSkeleton  # Added FBModelSkeleton to imports
 
 
 def get_motionbuilder_main_window():
@@ -181,6 +183,7 @@ class MotionBuilderExporter(QMainWindow):
         self.original_parent = None
         self.selected_nodes_count = 0
         self.selected_nodes = []
+        self.node_counts = {'full_hierarchy': None, 'root_only': None}
         
         # Store references to collapsible groups for later updating
         self.group_boxes = {}
@@ -201,9 +204,21 @@ class MotionBuilderExporter(QMainWindow):
     def init_ui(self):
         """Initialize the main window UI"""
         self.setWindowTitle("MotionBuilder Animation Exporter")
-        self.resize(750, 650)  # Slightly larger default size
-        self.setMinimumWidth(750)  # Increased minimum width
-        self.setMinimumHeight(550)  # Increased minimum height to ensure options are visible
+        
+        # Get saved options expanded state for initial sizing
+        settings = self.load_settings()
+        options_expanded = settings.get("options_expanded", True)
+        
+        # Set minimum width
+        self.setMinimumWidth(400)  # Allow narrower width for flexibility
+        
+        # Set appropriate initial size and minimum height based on options state
+        if options_expanded:
+            self.resize(500, 750)  # Slightly wider than minimum, with height for expanded options
+            self.setMinimumHeight(750)  # Ensure minimum height with options expanded
+        else:
+            self.resize(500, 650)  # Slightly wider than minimum, standard height
+            self.setMinimumHeight(550)  # Base minimum height when options are collapsed
         
         # Set window to stay on top of parent only (not all windows)
         if self.parent():
@@ -238,9 +253,15 @@ class MotionBuilderExporter(QMainWindow):
         self.export_button.setMinimumHeight(30)
         self.export_button.setFixedWidth(120)  # Fixed width for the button
         self.export_button.clicked.connect(self.on_export)
-        button_layout.addStretch(1)  # Add stretch before button
+        button_layout.addStretch(1)  # Add stretch before buttons
+        
+        # No validate button here anymore, moved to Export Options section
+        # We go straight to the export button
+        
+        # Export button
         button_layout.addWidget(self.export_button)
-        button_layout.addStretch(1)  # Add stretch after button
+        
+        button_layout.addStretch(1)  # Add stretch after buttons
         
         main_layout.addWidget(button_frame)
         
@@ -253,12 +274,237 @@ class MotionBuilderExporter(QMainWindow):
         
         # Initial skeleton detection
         self.select_skeleton_hierarchy()
+        
+        # Update the skeleton info display for the initial state
+        if hasattr(self, 'skeleton_root') and self.skeleton_root:
+            self.update_skeleton_info_display()
     
     def timerEvent(self, event):
         """Handle timer events to check for scene changes"""
         if FBApplication().FBXFileName != self.current_fbx:
             self.close()
             
+    def on_full_hierarchy_toggled(self, checked):
+        """Handle toggling of full hierarchy checkbox"""
+        # Reset node counts to ensure proper counting in the new mode
+        self.node_counts = {'full_hierarchy': None, 'root_only': None}
+        
+        # Update the skeleton information display to show current mode
+        self.update_skeleton_info_display(checked)
+        
+        # Always call this to ensure rotation input fields are properly updated
+        self.update_rotation_inputs_state()
+        
+        # Disable the Plotted Axis Conversion dropdown when full hierarchy is checked
+        if hasattr(self, 'up_axis_combo'):
+            self.up_axis_combo.setEnabled(not checked)
+            
+            # If checking the box, force to Y-up
+            if checked:
+                # Temporarily block signals to avoid recursive calls
+                self.up_axis_combo.blockSignals(True)
+                self.up_axis_combo.setCurrentText("Y-up (None)")
+                self.up_axis_combo.blockSignals(False)
+        
+        # Save the setting
+        settings = self.load_settings()
+        settings["export_full_hierarchy"] = checked
+        self.save_settings(settings)
+        
+        # Zero out rotation values when enabling full hierarchy
+        # (Note: actual enabling/disabling is now handled by update_rotation_inputs_state)
+        if checked:
+            for field_name in ['x_rotation_input', 'y_rotation_input', 'z_rotation_input']:
+                if hasattr(self, field_name):
+                    field = getattr(self, field_name)
+                    field.setText("0.0")
+        
+        # Gray out specific labels when full hierarchy is checked
+        for child in self.findChildren(QGroupBox):
+            if child.title() == "Axis Conversion":
+                # Find the Plotted Axis Conversion and Manual Rotation labels
+                for item in child.findChildren(QLabel):
+                    if "Plotted Axis Conversion" in item.text() or "Manual Rotation" in item.text():
+                        # Gray out or restore these labels based on checkbox state
+                        if checked:
+                            item.setStyleSheet("color: gray;")
+                        else:
+                            item.setStyleSheet("")
+        
+    def update_skeleton_info_display(self, full_hierarchy_mode=None):
+        """Update the skeleton information display based on current mode"""
+        if not hasattr(self, 'skeleton_info_label') or not self.skeleton_root:
+            return
+            
+        # If full_hierarchy_mode is not provided, get it from the checkbox
+        if full_hierarchy_mode is None and hasattr(self, 'full_hierarchy_cb'):
+            full_hierarchy_mode = self.full_hierarchy_cb.isChecked()
+        
+        # Make sure node counts are initialized for current mode
+        if 'full_hierarchy' not in self.node_counts or 'root_only' not in self.node_counts:
+            self.node_counts = {'full_hierarchy': None, 'root_only': None}
+            
+        if full_hierarchy_mode:
+            # Check if we already know the full hierarchy count
+            if self.node_counts['full_hierarchy'] is None:
+                # Find the top parent for display
+                top_parent = self.find_top_parent(self.skeleton_root)
+                if not top_parent:
+                    top_parent = self.skeleton_root
+                    
+                # Save current selection to restore later
+                original_selection = FBModelList()
+                FBGetSelectedModels(original_selection)
+                original_selection_array = [original_selection[i] for i in range(original_selection.GetCount())]
+                
+                # Clear the scene selection first
+                FBSystem().Scene.Evaluate()
+                model_list = FBModelList()
+                FBGetSelectedModels(model_list)
+                for i in range(model_list.GetCount()):
+                    model_list[i].Selected = False
+                    
+                # Select just the top parent to start with
+                top_parent.Selected = True
+                    
+                # Recursively select ALL children
+                try:
+                    # Use a direct approach to select all children
+                    stack = [top_parent]
+                    while stack:
+                        current = stack.pop()
+                        try:
+                            # Try different ways to access children
+                            children = []
+                            # First try regular Children attribute
+                            try:
+                                if hasattr(current, 'Children'):
+                                    for child in current.Children:
+                                        children.append(child)
+                            except (TypeError, AttributeError):
+                                pass
+                                
+                            # If that failed, try GetCount method
+                            if not children and hasattr(current, 'Children') and hasattr(current.Children, 'GetCount'):
+                                count = current.Children.GetCount()
+                                for i in range(count):
+                                    child = current.Children.GetAt(i)
+                                    children.append(child)
+                            
+                            # Process all children we found
+                            for child in children:
+                                # Select this child
+                                if hasattr(child, 'Selected'):
+                                    child.Selected = True
+                                # Add to stack to process its children
+                                stack.append(child)
+                        except Exception:
+                            # Skip errors and continue with other children
+                            pass
+                except Exception as e:
+                    if self.debug:
+                        self.debug_print(f"Error counting hierarchy: {e}")
+                    
+                # Get accurate count of selected nodes
+                selection = FBModelList()
+                FBGetSelectedModels(selection)
+                self.node_counts['full_hierarchy'] = selection.GetCount()
+                
+                # Clear selection again
+                FBSystem().Scene.Evaluate()
+                FBGetSelectedModels(model_list)
+                for i in range(model_list.GetCount()):
+                    model_list[i].Selected = False
+                
+                # Restore original selection
+                for model in original_selection_array:
+                    if hasattr(model, 'Selected'):
+                        model.Selected = True
+            
+            # Get the top parent for display
+            top_parent = self.find_top_parent(self.skeleton_root)
+            if not top_parent:
+                top_parent = self.skeleton_root
+                
+            # Update the label for full hierarchy mode
+            self.skeleton_info_label.setText(
+                f"Full Hierarchy Export Mode\n"
+                f"Top Parent: {top_parent.Name if hasattr(top_parent, 'Name') else 'unknown'}\n"
+                f"Selected Nodes: {self.node_counts['full_hierarchy']} (ALL nodes in hierarchy)"
+            )
+        else:
+            # Check if we already know the root-only count
+            if self.node_counts['root_only'] is None:
+                # Count only skeleton joints from the root and down
+                # Save current selection to restore later
+                original_selection = FBModelList()
+                FBGetSelectedModels(original_selection)
+                original_selection_array = [original_selection[i] for i in range(original_selection.GetCount())]
+                
+                # Clear the scene selection first
+                FBSystem().Scene.Evaluate()
+                model_list = FBModelList()
+                FBGetSelectedModels(model_list)
+                for i in range(model_list.GetCount()):
+                    model_list[i].Selected = False
+                
+                # Select the root
+                self.skeleton_root.Selected = True
+                
+                # Now select all the skeleton children (but not parent)
+                if hasattr(self.skeleton_root, 'Parent') and self.skeleton_root.Parent:
+                    self.skeleton_root.Parent.Selected = False
+                
+                # Select only skeleton node children
+                try:
+                    self.select_children_simple(self.skeleton_root)
+                except Exception as e:
+                    if self.debug:
+                        self.debug_print(f"Error selecting skeleton children: {e}")
+                
+                # Deselect any null objects (not part of the skeleton)
+                self.deselect_null_objects()
+                
+                # Count the selected nodes (only skeleton joints)
+                selection = FBModelList()
+                FBGetSelectedModels(selection)
+                self.node_counts['root_only'] = selection.GetCount()
+                
+                # Clear selection again
+                FBSystem().Scene.Evaluate()
+                FBGetSelectedModels(model_list)
+                for i in range(model_list.GetCount()):
+                    model_list[i].Selected = False
+                
+                # Restore original selection
+                for model in original_selection_array:
+                    if hasattr(model, 'Selected'):
+                        model.Selected = True
+            
+            # Normal mode display
+            self.skeleton_info_label.setText(
+                f"Normal Export Mode\n"
+                f"Skeleton Root: {self.skeleton_root.Name if hasattr(self.skeleton_root, 'Name') else 'unknown'}\n"
+                f"Selected Nodes: {self.node_counts['root_only']} (only skeleton joints below root)"
+            )
+    
+    def on_sdk_axis_changed(self, text):
+        """Handle SDK axis conversion dropdown changes"""
+        # Save the selection in settings
+        settings = self.load_settings()
+        
+        # Update FBX SDK axis conversion settings
+        sdk_settings = settings.get("fbx_sdk_axis_conversion", {})
+        sdk_settings["enabled"] = text != "Y-up (None)"
+        sdk_settings["target_axis"] = text.replace(" (None)", "")
+        settings["fbx_sdk_axis_conversion"] = sdk_settings
+        
+        # Save updated settings
+        self.save_settings(settings)
+        
+        # Debug output
+        self.debug_print(f"SDK Axis Conversion set to: {text}")
+        
     def update_rotation_inputs_state(self):
         """Update the state of rotation input fields based on current axis selection"""
         if not hasattr(self, 'x_rotation_input'):
@@ -266,10 +512,16 @@ class MotionBuilderExporter(QMainWindow):
             
         is_manual = self.up_axis_combo.currentText() == "Manual Rotations"
         
+        # Check if full hierarchy is enabled
+        full_hierarchy_enabled = hasattr(self, 'full_hierarchy_cb') and self.full_hierarchy_cb.isChecked()
+        
+        # Disable rotation inputs if full hierarchy is enabled or if manual mode isn't selected
+        rotation_enabled = not full_hierarchy_enabled and is_manual
+        
         # Enable/disable rotation inputs
-        self.x_rotation_input.setEnabled(is_manual)
-        self.y_rotation_input.setEnabled(is_manual)
-        self.z_rotation_input.setEnabled(is_manual)
+        self.x_rotation_input.setEnabled(rotation_enabled)
+        self.y_rotation_input.setEnabled(rotation_enabled)
+        self.z_rotation_input.setEnabled(rotation_enabled)
         
         # Set default values based on selected preset
         if not is_manual:
@@ -1188,10 +1440,23 @@ class MotionBuilderExporter(QMainWindow):
         self.options_group.mousePressEvent = lambda event: self.toggle_options_group()
         self.options_group_expanded = expanded
         
+        # Set initial max height based on expanded state
+        if not expanded:
+            self.options_group.setFixedHeight(30)
+        else:
+            self.options_group.setMaximumHeight(16777215)  # Default maximum height
+        
         # Create options container widget
         self.options_widget = QWidget()
         options_layout = QGridLayout(self.options_widget)
         options_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Set initial visibility based on expanded state
+        self.options_widget.setVisible(expanded)
+        
+        # Set explicit height for visibility if expanded
+        if expanded:
+            self.options_widget.setMinimumHeight(350)
         
         # File prefix
         prefix_label = QLabel("Filename Prefix:")
@@ -1205,6 +1470,8 @@ class MotionBuilderExporter(QMainWindow):
         
         # JSON settings file button
         json_btn = QPushButton("Open Settings File")
+        json_btn.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))  # Use a file/notepad icon
+        json_btn.setToolTip("Open this workfile's exporter .json settings file")
         json_btn.clicked.connect(self.open_settings_file)
         options_layout.addWidget(json_btn, 0, 2)
         
@@ -1217,10 +1484,20 @@ class MotionBuilderExporter(QMainWindow):
         
         self.bake_anim_cb = QCheckBox("Bake Animation")
         self.bake_anim_cb.setChecked(self.load_settings().get("bake_animation", True))
+        self.bake_anim_cb.setToolTip("When enabled, plots animation for all skeleton joints before export using Unroll filter, making it independent of constraints and resulting in smoother rotations. After export, animation keys are removed to reduce scene size.")
         anim_layout.addWidget(self.bake_anim_cb)
+        
+        self.full_hierarchy_cb = QCheckBox("Export Full Hierarchy")
+        self.full_hierarchy_cb.setChecked(self.load_settings().get("export_full_hierarchy", False))
+        self.full_hierarchy_cb.setToolTip("By default, we only export joints from the 'root' joint and down. With this option, we export the full hierarchy related to the skeleton.")
+        anim_layout.addWidget(self.full_hierarchy_cb)
+        
+        # Connect signal to handle enabling/disabling axis conversion options
+        self.full_hierarchy_cb.toggled.connect(self.on_full_hierarchy_toggled)
         
         self.export_log_cb = QCheckBox("Show Export Log")
         self.export_log_cb.setChecked(self.load_settings().get("export_log", True))
+        self.export_log_cb.setToolTip("Displays a summary of exports after completion, including information about which takes were exported and their locations.")
         anim_layout.addWidget(self.export_log_cb)
         
         # Add a stretch to push checkboxes to the left
@@ -1239,15 +1516,17 @@ class MotionBuilderExporter(QMainWindow):
         axis_layout.setSpacing(5)  # Reduced spacing
         
         # FBX SDK Axis Conversion option - NOW FIRST
-        sdk_axis_label = QLabel("FBX SDK Axis Conversion:")
+        self.sdk_axis_label = QLabel("FBX SDK Axis Conversion:")
+        self.sdk_axis_label.setObjectName("sdk_axis_label")  # Set object name for identification
         enabled = FBX_SDK_AVAILABLE
-        sdk_axis_label.setEnabled(enabled)
+        self.sdk_axis_label.setEnabled(enabled)
         if not enabled:
-            sdk_axis_label.setStyleSheet("color: gray;")
-            sdk_axis_label.setToolTip("FBX SDK not installed - SDK axis conversion unavailable")
-        axis_layout.addWidget(sdk_axis_label, 0, 0)
+            self.sdk_axis_label.setStyleSheet("color: gray;")
+            self.sdk_axis_label.setToolTip("FBX SDK not installed - SDK axis conversion unavailable")
+        axis_layout.addWidget(self.sdk_axis_label, 0, 0)
         
         self.sdk_up_axis_combo = QComboBox()
+        self.sdk_up_axis_combo.setObjectName("sdk_up_axis_combo")  # Set object name for identification
         self.sdk_up_axis_combo.addItems(["Y-up (None)", "Z-up"])
         # Get saved value, default to Y-up (None)
         saved_sdk_axis = self.load_settings().get("fbx_sdk_axis_conversion", {}).get("target_axis", "Y-up")
@@ -1261,10 +1540,23 @@ class MotionBuilderExporter(QMainWindow):
             
         self.sdk_up_axis_combo.setCurrentText("Y-up (None)" if saved_sdk_axis == "Y-up" else saved_sdk_axis)
         self.sdk_up_axis_combo.setEnabled(enabled)
+        
+        # Set specific properties to make sure it works properly
         if not enabled:
             # Gray out dropdown with clear message when FBX SDK is not available
             self.sdk_up_axis_combo.setStyleSheet("color: gray; background-color: #eeeeee;")
             self.sdk_up_axis_combo.setToolTip("FBX SDK not installed - Please install FBX SDK to use this feature")
+        else:
+            # Ensure combo box is interactive
+            self.sdk_up_axis_combo.setStyleSheet("")
+            self.sdk_up_axis_combo.setToolTip("Select axis system used by the FBX SDK during export")
+        
+        # Make sure the combo box works properly
+        self.sdk_up_axis_combo.setMaxVisibleItems(10)  # Show plenty of items
+        
+        # Add connection to handle changes when the control is manipulated
+        self.sdk_up_axis_combo.currentTextChanged.connect(self.on_sdk_axis_changed)
+        
         axis_layout.addWidget(self.sdk_up_axis_combo, 0, 1)
         
         # Plotted Axis Conversion - NOW SECOND
@@ -1334,19 +1626,38 @@ class MotionBuilderExporter(QMainWindow):
         
         options_layout.addWidget(axis_group, 2, 0, 1, 3)
         
-        # Skeleton info
-        skeleton_group = QGroupBox("Skeleton Information")
+        # Export info
+        skeleton_group = QGroupBox("Export Information")
         skeleton_group.setStyleSheet(self.get_inner_group_style())
         skeleton_layout = QVBoxLayout(skeleton_group)
         skeleton_layout.setContentsMargins(10, 5, 10, 5)  # Reduced vertical margins
         
         self.skeleton_info_label = QLabel("Skeleton Root: Not detected\nSelected Nodes: 0")
+        self.skeleton_info_label.setMinimumHeight(40)  # Minimum height for label
+        self.skeleton_info_label.setWordWrap(True)     # Enable word wrap for long text
         skeleton_layout.addWidget(self.skeleton_info_label)
         
-        # Set fixed height for the skeleton group
-        skeleton_group.setFixedHeight(60)
+        # No fixed height - let it adjust to content
+        skeleton_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         
         options_layout.addWidget(skeleton_group, 3, 0, 1, 3)
+        
+        # Add Validate Joint Data button at the bottom of options
+        validate_button_container = QWidget()
+        validate_button_layout = QHBoxLayout(validate_button_container)
+        validate_button_layout.setContentsMargins(0, 5, 0, 0)  # Add some top margin
+        
+        validate_button = QPushButton("Validate Joint Data")
+        validate_button.setMinimumHeight(30)
+        validate_button.setToolTip("Check all joints in selected takes for NaN values, zero scales, or other invalid data")
+        validate_button.clicked.connect(self.validate_joint_data)
+        
+        # Center the button horizontally
+        validate_button_layout.addStretch(1)
+        validate_button_layout.addWidget(validate_button)
+        validate_button_layout.addStretch(1)
+        
+        options_layout.addWidget(validate_button_container, 4, 0, 1, 3)
         
         # Add options widget to group
         group_layout = QVBoxLayout(self.options_group)
@@ -1408,12 +1719,15 @@ class MotionBuilderExporter(QMainWindow):
             # Show content AFTER setting sizes
             self.options_widget.setVisible(True)
             
+            # Set minimum window height to ensure all options are visible
+            self.setMinimumHeight(750)  # Ensure window is tall enough to see all options
+            
             # Force layout update
             QApplication.processEvents()
             
             # Now adjust the window size to accommodate content
             # First get the minimum required height
-            required_height = self.options_group.sizeHint().height() + 350  # Add buffer for other content
+            required_height = max(750, self.options_group.sizeHint().height() + 350)  # Minimum 750px or larger if needed
             
             # Check the current window height
             current_height = self.height()
@@ -1426,6 +1740,9 @@ class MotionBuilderExporter(QMainWindow):
             self.options_widget.setVisible(False)
             self.options_group.setFixedHeight(30)
             
+            # Reset minimum height to allow smaller window when options are collapsed
+            self.setMinimumHeight(550)
+            
         # Save state to settings
         settings = self.load_settings()
         settings["options_expanded"] = self.options_group_expanded
@@ -1435,7 +1752,7 @@ class MotionBuilderExporter(QMainWindow):
         """Show help information dialog"""
         help_dialog = QDialog(self)
         help_dialog.setWindowTitle("FBX Exporter Help")
-        help_dialog.setFixedSize(600, 400)
+        help_dialog.setFixedSize(700, 500)  # Increased size to accommodate expanded content
         
         layout = QVBoxLayout(help_dialog)
         
@@ -1450,14 +1767,18 @@ class MotionBuilderExporter(QMainWindow):
         
         # Help content using HTML formatting
         help_text = """<html>
-        <h3>FBX Exporter - Quick Guide</h3>
+        <p>================================ "Morris" 2025 ヽ(◔◡◉)ﾉ ===============================</p> 
+        <h3>FBX Exporter - Information</h3>
         
         <p><b>Global Export Folder:</b> Base directory where exports will be saved. Uses groups for organization.</p>
         
         <p><b>File Prefix:</b> Optional prefix added to all exported filenames.</p>
         
+        <p><b>Open Settings File:</b> Opens the exporter's JSON settings file for the current workfile. This file stores all your preferences (export folder, checkbox states, etc.) between sessions. If you need to reset the exporter to defaults, simply delete this file.</p>
+        
         <h4>Animation Options</h4>
         <p><b>Bake Animation:</b> When enabled, plots animation for all skeleton joints before export using Unroll filter, making it independent of constraints and resulting in smoother rotations. After export, animation keys are removed to reduce scene size.</p>
+        <p><b>Export Full Hierarchy:</b> By default, only the skeleton joints from the root and down are exported. With this option, the entire hierarchy related to the skeleton (including the root's parent and all its children) is exported. This disables the plotted axis conversion options as they're not needed for full hierarchy exports.</p>
         <p><b>Show Export Log:</b> Displays a summary of exports after completion.</p>
         
         <h4>Axis Conversion</h4>
@@ -1471,6 +1792,19 @@ class MotionBuilderExporter(QMainWindow):
             <li><b>Z-up:</b> Rotates around X-axis to convert Y-up to Z-up (X=-90, Y=0, Z=0)</li>
             <li><b>Manual Rotations:</b> Use custom rotation values from the X, Y, Z input fields</li>
         </ul>
+        
+        <h4>Export Information</h4>
+        <p>Shows information about the currently detected skeleton root and node counts. The count will change based on whether "Export Full Hierarchy" is enabled.</p>
+        
+        <p><b>Validate Joint Data:</b> Scans all joints in the selected takes for problematic data that could cause export issues:</p>
+        <ul>
+            <li>Checks for NaN (Not a Number) values in translation, rotation, and scaling</li>
+            <li>Detects infinite values that would break exported animation</li>
+            <li>Identifies zero or near-zero scale values that can cause problems</li>
+            <li>Shows detailed report of any issues found, organized by joint and property</li>
+        </ul>
+        
+        <p><b>Fix Joints:</b> Automatically fixes problematic joints by resetting only the affected properties (Translation, Rotation, or Scaling) to their default values. This helps repair corrupted animation data without losing the entire animation.</p>
         
         <h4>Takes</h4>
         <p>Select takes to export by checking them in the list. Use groups (==Group Name==) to organize takes and define separate export locations.</p>
@@ -1506,6 +1840,7 @@ class MotionBuilderExporter(QMainWindow):
         
     def select_skeleton_hierarchy(self):
         """Select the Skeleton Root node and all its Skeleton Node children using a simpler approach"""
+        # Clear any existing selection first
         selection = FBModelList()
         FBGetSelectedModels(selection)
         for model in selection:
@@ -1527,25 +1862,189 @@ class MotionBuilderExporter(QMainWindow):
             self.skeleton_info_label.setText("Skeleton Root: Not detected\nSelected Nodes: 0")
             return False
         
+        # Reset node counts when the skeleton root changes
+        self.node_counts = {'full_hierarchy': None, 'root_only': None}
+        
         self.skeleton_root = skeleton_root
-        if hasattr(skeleton_root, 'Parent') and skeleton_root.Parent:
-            skeleton_root.Parent.Selected = False
-        skeleton_root.Selected = True
+        
+        # Check if we're in full hierarchy mode
+        is_full_hierarchy = hasattr(self, 'full_hierarchy_cb') and self.full_hierarchy_cb.isChecked()
+        
+        # Select based on mode
+        if is_full_hierarchy:
+            success = self.select_full_hierarchy()
+        else:
+            # Normal selection mode - only select skeleton nodes
+            if hasattr(skeleton_root, 'Parent') and skeleton_root.Parent:
+                skeleton_root.Parent.Selected = False
+            skeleton_root.Selected = True
+            try:
+                self.select_children_simple(skeleton_root)
+            except Exception as e:
+                pass  # Error handling disabled for performance
+            self.deselect_null_objects()
+            success = True
+            
+        # Store the selected nodes for export
+        selection = FBModelList()
+        FBGetSelectedModels(selection)
+        self.selected_nodes_count = selection.GetCount()
+        self.selected_nodes = [selection[i] for i in range(selection.GetCount())]
+        
+        # Update the label
+        if self.skeleton_info_label:
+            if is_full_hierarchy:
+                # Get the top parent for display
+                top_parent = self.find_top_parent(self.skeleton_root)
+                if not top_parent:
+                    top_parent = self.skeleton_root
+                    
+                self.skeleton_info_label.setText(
+                    f"Full Hierarchy Export Mode\n"
+                    f"Top Parent: {top_parent.Name if hasattr(top_parent, 'Name') else 'unknown'}\n"
+                    f"Selected Nodes: {self.selected_nodes_count} (ALL nodes in hierarchy)"
+                )
+            else:
+                self.skeleton_info_label.setText(
+                    f"Normal Export Mode\n"
+                    f"Skeleton Root: {self.skeleton_root.Name if hasattr(self.skeleton_root, 'Name') else 'unknown'}\n"
+                    f"Selected Nodes: {self.selected_nodes_count} (only skeleton joints below root)"
+                )
+        
+        # Update node counts based on the mode
+        if is_full_hierarchy:
+            self.node_counts['full_hierarchy'] = self.selected_nodes_count
+        else:
+            self.node_counts['root_only'] = self.selected_nodes_count
+            
+        # Clear selection after counting
+        FBSystem().Scene.Evaluate()
+        FBGetSelectedModels(selection)
+        for i in range(selection.GetCount()):
+            selection[i].Selected = False
+            
+        return self.selected_nodes_count > 0
+        
+    def find_top_parent(self, node):
+        """Find the very top parent in the hierarchy"""
+        if not node:
+            return None
+            
+        # Keep traversing up until we reach the top
+        current = node
+        while current and hasattr(current, 'Parent') and current.Parent:
+            current = current.Parent
+            
+        return current
+            
+    def select_full_hierarchy(self):
+        """Select the full hierarchy from the top parent down"""
+        if not self.skeleton_root:
+            return False
+            
+        # Find the top parent of the root
+        top_parent = self.find_top_parent(self.skeleton_root)
+        if not top_parent:
+            top_parent = self.skeleton_root
+            
+        if self.debug:
+            self.debug_print(f"Found top parent: {top_parent.Name if hasattr(top_parent, 'Name') else 'Unknown'}")
+        
+        # Clear selection first
+        FBSystem().Scene.Evaluate()
+        model_list = FBModelList()
+        FBGetSelectedModels(model_list)
+        for i in range(model_list.GetCount()):
+            model_list[i].Selected = False
+            
+        # Select the top parent
+        top_parent.Selected = True
+        
+        # Recursively select ALL children (more thorough approach)
         try:
-            self.select_children_simple(skeleton_root)
+            # Use a direct approach to select all children
+            stack = [top_parent]
+            while stack:
+                current = stack.pop()
+                try:
+                    # Try different ways to access children
+                    children = []
+                    # First try regular Children attribute
+                    try:
+                        if hasattr(current, 'Children'):
+                            for child in current.Children:
+                                children.append(child)
+                    except (TypeError, AttributeError):
+                        pass
+                        
+                    # If that failed, try GetCount method
+                    if not children and hasattr(current, 'Children') and hasattr(current.Children, 'GetCount'):
+                        count = current.Children.GetCount()
+                        for i in range(count):
+                            child = current.Children.GetAt(i)
+                            children.append(child)
+                    
+                    # Process all children we found
+                    for child in children:
+                        # Select this child
+                        if hasattr(child, 'Selected'):
+                            child.Selected = True
+                        # Add to stack to process its children
+                        stack.append(child)
+                except Exception:
+                    # Skip errors and continue with other children
+                    pass
         except Exception as e:
-            pass  # Error handling disabled for performance
-        self.deselect_null_objects()
+            if self.debug:
+                self.debug_print(f"Error selecting children: {e}")
+            
+        # Get the selected nodes
         selection = FBModelList()
         FBGetSelectedModels(selection)
         self.selected_nodes_count = len(selection)
         self.selected_nodes = [selection[i] for i in range(selection.GetCount())]
-        if self.skeleton_info_label:
-            self.skeleton_info_label.setText(
-                f"Skeleton Root: {self.skeleton_root.Name if hasattr(self.skeleton_root, 'Name') else 'unknown'}\n"
-                f"Selected Nodes: {self.selected_nodes_count}"
-            )
+        
+        # Don't update the UI here, let the calling function do it
+        # We're just selecting and counting here
+            
         return self.selected_nodes_count > 0
+    
+    def select_all_children(self, node):
+        """Select all children without filtering nulls"""
+        try:
+            try:
+                for child in node.Children:
+                    # Select this child
+                    child.Selected = True
+                    # Recursively select its children
+                    self.select_all_children(child)
+            except TypeError:
+                try:
+                    count = node.Children.GetCount()
+                    for i in range(count):
+                        child = node.Children.GetAt(i)
+                        # Select this child
+                        child.Selected = True
+                        # Recursively select its children
+                        self.select_all_children(child)
+                except:
+                    i = 0
+                    while True:
+                        try:
+                            child = node.Children[i]
+                            # Select this child
+                            child.Selected = True
+                            # Recursively select its children
+                            self.select_all_children(child)
+                            i += 1
+                        except IndexError:
+                            break
+                        except Exception as e:
+                            i += 1
+                            if i > 1000:
+                                break
+        except Exception as e:
+            pass  # Error handling disabled for performance
         
     def select_children_simple(self, node):
         """Select all children of this node using a simpler approach"""
@@ -1936,6 +2435,494 @@ class MotionBuilderExporter(QMainWindow):
             groups.append(current_group)
         return groups
     
+    def validate_joint_data(self):
+        """Validate joint data in all selected takes for invalid values (NaN, infinite, zero scale)"""
+        # Store original debug state
+        original_debug = self.debug
+        
+        # Get selected takes from the UI
+        export_items = []
+        
+        # Get selected takes from group_info_list which contains all the checkboxes
+        for info in self.group_info_list:
+            for take, checkbox in info["checkbox_vars"].items():
+                if checkbox.isChecked():
+                    export_items.append({"take": take})
+        
+        # If no takes selected, show warning
+        if not export_items:
+            QMessageBox.warning(self, "Validation Warning", "No takes selected. Please select at least one take to validate.")
+            return
+        
+        # Get the system
+        system = FBSystem()
+        
+        # Store the current take to restore it later
+        current_take = system.CurrentTake
+        
+        # Initialize counters and result arrays
+        total_joints_checked = 0
+        issues_found = []
+        
+        try:
+            # For each selected take
+            for item in export_items:
+                take = item["take"]
+                
+                # Set this take as current
+                system.CurrentTake = take
+                
+                # Evaluate the scene to update all transforms
+                system.Scene.Evaluate()
+                
+                # Check all skeleton joints in the scene
+                all_joints = []
+                for joint in system.Scene.Components:
+                    if isinstance(joint, FBModelSkeleton):
+                        all_joints.append(joint)
+                        
+                total_joints_checked += len(all_joints)
+                
+                # Validate each joint
+                for joint in all_joints:
+                    # Check translation
+                    trans = joint.Translation
+                    
+                    # Check rotation
+                    rot = joint.Rotation
+                    
+                    # Check scaling
+                    scale = joint.Scaling
+                    
+                    for i, axis in enumerate(['X', 'Y', 'Z']):
+                        # Check for NaN or inf
+                        if not math.isfinite(trans[i]):
+                            issues_found.append({
+                                'take': take.Name,
+                                'joint': joint.Name,
+                                'property': f"Translation.{axis}",
+                                'value': trans[i],
+                                'issue': "NaN or infinite value"
+                            })
+                    
+                    # Check rotation
+                    rot = joint.Rotation
+                    for i, axis in enumerate(['X', 'Y', 'Z']):
+                        # Check for NaN or inf
+                        if not math.isfinite(rot[i]):
+                            issues_found.append({
+                                'take': take.Name,
+                                'joint': joint.Name,
+                                'property': f"Rotation.{axis}",
+                                'value': rot[i],
+                                'issue': "NaN or infinite value"
+                            })
+                    
+                    # Check scaling
+                    scale = joint.Scaling
+                    for i, axis in enumerate(['X', 'Y', 'Z']):
+                        # Check for NaN or inf
+                        if not math.isfinite(scale[i]):
+                            issues_found.append({
+                                'take': take.Name,
+                                'joint': joint.Name,
+                                'property': f"Scaling.{axis}",
+                                'value': scale[i],
+                                'issue': "NaN or infinite value"
+                            })
+                        # Check for zero or very small scale (0.001 or less)
+                        elif abs(scale[i]) <= 0.001:
+                            issues_found.append({
+                                'take': take.Name,
+                                'joint': joint.Name,
+                                'property': f"Scaling.{axis}",
+                                'value': scale[i],
+                                'issue': "Zero or near-zero scale"
+                            })
+            
+            # Restore original take
+            system.CurrentTake = current_take
+            
+            # Display results
+            if not issues_found:
+                # Create success dialog
+                success_dialog = QDialog(self)
+                success_dialog.setWindowTitle("Validation Successful")
+                success_dialog.setMinimumWidth(400)
+                
+                # Create layout
+                layout = QVBoxLayout(success_dialog)
+                
+                # Add message
+                message = QLabel(f"No joint data issues found!\n\nChecked {total_joints_checked} joints across {len(export_items)} takes.")
+                message.setWordWrap(True)
+                layout.addWidget(message)
+                
+                # Add OK button
+                button = QPushButton("OK")
+                button.clicked.connect(success_dialog.accept)
+                layout.addWidget(button)
+                
+                # Show dialog
+                success_dialog.exec()
+            else:
+                # First consolidate issues by joint and take
+                by_joint_and_take = {}
+                
+                for issue in issues_found:
+                    joint_name = issue['joint']
+                    take_name = issue['take']
+                    
+                    # Extract property base (Translation, Rotation, Scaling) and axis
+                    property_parts = issue['property'].split('.')
+                    property_base = property_parts[0]  # Translation, Rotation, or Scaling
+                    property_axis = property_parts[1]  # X, Y, or Z
+                    
+                    # Create nested dictionaries if they don't exist
+                    if joint_name not in by_joint_and_take:
+                        by_joint_and_take[joint_name] = {}
+                    
+                    if take_name not in by_joint_and_take[joint_name]:
+                        by_joint_and_take[joint_name][take_name] = {}
+                    
+                    if property_base not in by_joint_and_take[joint_name][take_name]:
+                        by_joint_and_take[joint_name][take_name][property_base] = {}
+                    
+                    # Store the issue details under the property type and axis
+                    by_joint_and_take[joint_name][take_name][property_base][property_axis] = {
+                        'value': issue['value'],
+                        'issue': issue['issue']
+                    }
+                
+                # Create issues dialog
+                issues_dialog = QDialog(self)
+                issues_dialog.setWindowTitle("Joint Data Issues Found")
+                issues_dialog.setMinimumWidth(700)
+                issues_dialog.setMinimumHeight(500)
+                
+                # Create layout
+                layout = QVBoxLayout(issues_dialog)
+                
+                # Add summary label - with affected joint count
+                affected_joints_count = len(by_joint_and_take)
+                summary = QLabel(f"Found issues in {affected_joints_count} joints across {len(export_items)} takes:")
+                summary.setWordWrap(True)
+                layout.addWidget(summary)
+                
+                # Create text area for issues
+                issues_text = QTextEdit()
+                issues_text.setReadOnly(True)
+                
+                # Format consolidated issues by joint
+                issues_str = ""
+                for joint_name, takes_data in sorted(by_joint_and_take.items()):
+                    issues_str += f"Joint: {joint_name}\n"
+                    issues_str += "=" * 50 + "\n\n"
+                    
+                    # Get all takes for this joint
+                    all_takes = sorted(takes_data.keys())
+                    issues_str += f"Affected in {len(all_takes)} takes:\n"
+                    for take in all_takes:
+                        issues_str += f"  - {take}\n"
+                    issues_str += "\n"
+                    
+                    # Group by property type (Translation, Rotation, Scaling)
+                    property_types = set()
+                    for take_data in takes_data.values():
+                        property_types.update(take_data.keys())
+                    
+                    for prop_type in sorted(property_types):
+                        issues_str += f"{prop_type} Issues:\n"
+                        
+                        # Determine which axes have issues
+                        affected_axes = set()
+                        for take_data in takes_data.values():
+                            if prop_type in take_data:
+                                affected_axes.update(take_data[prop_type].keys())
+                        
+                        # Display information for each affected axis
+                        for axis in sorted(affected_axes):
+                            # Get all unique issue types across takes
+                            issue_descriptions = set()
+                            values = set()
+                            
+                            for take_data in takes_data.values():
+                                if prop_type in take_data and axis in take_data[prop_type]:
+                                    issue_data = take_data[prop_type][axis]
+                                    issue_descriptions.add(issue_data['issue'])
+                                    values.add(str(issue_data['value']))
+                            
+                            # Display consolidated issue info
+                            issues_str += f"  {axis}-axis: {', '.join(values)} - {', '.join(issue_descriptions)}\n"
+                        
+                        issues_str += "\n"
+                    
+                    issues_str += "-" * 50 + "\n\n"
+                
+                issues_text.setText(issues_str)
+                layout.addWidget(issues_text)
+                
+                # Add Fix Joints button and OK button in a button row
+                buttons_widget = QWidget()
+                buttons_layout = QHBoxLayout(buttons_widget)
+                buttons_layout.setContentsMargins(0, 10, 0, 0)  # Add top margin for spacing
+                
+                # Fix Joints button
+                fix_button = QPushButton("Fix Joints")
+                fix_button.setToolTip("Reset all problematic joints to default values (Pos: 0,0,0 - Rot: 0,0,0 - Scale: 1,1,1)")
+                fix_button.clicked.connect(lambda: self.fix_problematic_joints(by_joint_and_take))
+                buttons_layout.addWidget(fix_button)
+                
+                # Spacer between buttons
+                buttons_layout.addSpacing(10)
+                
+                # OK button
+                ok_button = QPushButton("OK")
+                ok_button.clicked.connect(issues_dialog.accept)
+                buttons_layout.addWidget(ok_button)
+                
+                layout.addWidget(buttons_widget)
+                
+                # Show dialog
+                issues_dialog.exec()
+                
+        except Exception as e:
+            # Restore original take if exception occurs
+            system.CurrentTake = current_take
+            
+            # Restore original debug state
+            self.debug = original_debug
+            
+            if self.debug:
+                self.debug_print(f"Error during joint validation: {str(e)}")
+            QMessageBox.critical(self, "Validation Error", f"An error occurred during joint validation: {str(e)}")
+            traceback.print_exc()
+        finally:
+            # Restore original debug setting
+            self.debug = original_debug
+    
+    def fix_problematic_joints(self, joint_data):
+        """Fix all problematic joints by resetting them to default values
+        
+        Args:
+            joint_data: Dictionary with structure {joint_name: {take_name: {property_type: {axis: data}}}}
+        """
+        if not joint_data:
+            return
+            
+        # Show confirmation dialog
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Joint Fix",
+            f"This will reset {len(joint_data)} joints across multiple takes to default values:\n"
+            "- Position: 0,0,0\n"
+            "- Rotation: 0,0,0\n"
+            "- Scale: 1,1,1\n\n"
+            "This action cannot be undone. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if confirm != QMessageBox.Yes:
+            return
+            
+        # Store the current take to restore it later
+        system = FBSystem()
+        current_take = system.CurrentTake
+        
+        try:
+            # Use QDialog instead of QMessageBox for better control
+            progress_dialog = QDialog(self)
+            progress_dialog.setWindowTitle("Fixing Joints")
+            progress_dialog.setFixedSize(400, 100)
+            progress_dialog.setWindowFlags(progress_dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+            
+            # Create layout
+            layout = QVBoxLayout(progress_dialog)
+            
+            # Add progress message
+            self.progress_label = QLabel("Please wait while joints are being fixed...")
+            self.progress_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(self.progress_label)
+            
+            # Show the dialog without blocking
+            progress_dialog.show()
+            QApplication.processEvents()
+            
+            # Gather all joints and takes for more efficient processing
+            joints_to_fix = {}
+            takes_to_process = set()
+            
+            # First, map joints to their objects, problem properties, and collect all takes
+            for joint_name, takes_data in joint_data.items():
+                # Try to find the joint in the scene
+                joint = None
+                for model in system.Scene.Components:
+                    if hasattr(model, 'Name') and model.Name == joint_name:
+                        joint = model
+                        break
+                
+                if joint:
+                    # Track which properties need fixing in each take
+                    take_properties = {}
+                    for take_name, properties in takes_data.items():
+                        take_properties[take_name] = set(properties.keys())  # Translation, Rotation, Scaling
+                    
+                    joints_to_fix[joint_name] = {
+                        'object': joint,
+                        'takes': take_properties
+                    }
+                    takes_to_process.update(takes_data.keys())
+                else:
+                    self.debug_print(f"Failed to find joint: {joint_name}")
+            
+            # Map takes to their objects
+            take_objects = {}
+            for take_name in takes_to_process:
+                for t in system.Scene.Takes:
+                    if t.Name == take_name:
+                        take_objects[take_name] = t
+                        break
+            
+            # Calculate total operations (one per property that needs fixing)
+            total_operations = sum(
+                len(properties) for joint_info in joints_to_fix.values() 
+                for properties in joint_info['takes'].values()
+            )
+            fixed_count = 0
+            
+            # Now process each take once, fixing all affected joints in that take
+            for take_name, take in take_objects.items():
+                # Set the take as current
+                system.CurrentTake = take
+                system.Scene.Evaluate()
+                
+                # Update progress for this take
+                self.progress_label.setText(f"Processing take: {take_name}")
+                QApplication.processEvents()
+                
+                # Fix all joints with issues in this take
+                for joint_name, joint_info in joints_to_fix.items():
+                    problem_properties = joint_info['takes'].get(take_name)
+                    if problem_properties:
+                        joint = joint_info['object']
+                        
+                        # Update progress with property information
+                        property_list = ", ".join(problem_properties)
+                        self.progress_label.setText(f"Take: {take_name}\nFixing {property_list} for joint: {joint_name}")
+                        QApplication.processEvents()
+                        
+                        self.debug_print(f"Fixing {property_list} for {joint_name} in take {take_name}")
+                        
+                        # Only fix the problematic components
+                        if "Translation" in problem_properties:
+                            # Clear only translation animation
+                            self.clear_property_animation(joint, "Translation")
+                            # Reset translation to default
+                            joint.Translation = FBVector3d(0, 0, 0)
+                        
+                        if "Rotation" in problem_properties:
+                            # Clear only rotation animation
+                            self.clear_property_animation(joint, "Rotation")
+                            # Reset rotation to default
+                            joint.Rotation = FBVector3d(0, 0, 0)
+                        
+                        if "Scaling" in problem_properties:
+                            # Clear only scaling animation
+                            self.clear_property_animation(joint, "Scaling")
+                            # Reset scaling to default
+                            joint.Scaling = FBVector3d(1, 1, 1)
+                        
+                        # Update progress
+                        fixed_count += 1
+                        QApplication.processEvents()
+                    
+            # Restore the original take
+            system.CurrentTake = current_take
+            
+            # Make sure to close progress dialog and release references
+            progress_dialog.close()
+            progress_dialog.deleteLater()
+            self.progress_label = None
+            
+            # Process remaining events to ensure dialog is closed
+            QApplication.processEvents()
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Joints Fixed",
+                f"Successfully fixed {fixed_count} joint issues.\n"
+                "Only the problematic properties (Translation, Rotation, or Scaling) "
+                "of the affected joints have been reset to their default values.",
+                QMessageBox.Ok
+            )
+            
+            # Re-run validation to confirm fixes
+            self.validate_joint_data()
+            
+        except Exception as e:
+            # Restore original take if exception occurs
+            system.CurrentTake = current_take
+            self.debug_print(f"Error fixing joints: {str(e)}")
+            
+            # Make sure to close the progress dialog even on error
+            if 'progress_dialog' in locals() and progress_dialog and progress_dialog.isVisible():
+                progress_dialog.close()
+                progress_dialog.deleteLater()
+            
+            self.progress_label = None
+            QApplication.processEvents()
+            
+            QMessageBox.critical(self, "Fix Error", f"An error occurred while fixing joints: {str(e)}")
+            traceback.print_exc()
+            
+    def clear_property_animation(self, joint, property_name):
+        """Clear animation from a specific property of a joint in the current take
+        
+        Args:
+            joint: The joint object to modify
+            property_name: One of "Translation", "Rotation", or "Scaling"
+        """
+        try:
+            # Get animation node for the specific property
+            anim_node = None
+            
+            if property_name == "Translation":
+                anim_node = joint.Translation.GetAnimationNode()
+            elif property_name == "Rotation":
+                anim_node = joint.Rotation.GetAnimationNode()
+            elif property_name == "Scaling":
+                anim_node = joint.Scaling.GetAnimationNode()
+            else:
+                self.debug_print(f"Unknown property: {property_name}")
+                return
+                
+            # Function to remove all keys from an animation node
+            def remove_all_keys(node):
+                if not node:
+                    return
+                    
+                # Check if node has FCurves (animation)
+                for i in range(node.FCurves.GetCount()):
+                    curve = node.FCurves[i]
+                    if curve:
+                        # Remove all keys
+                        while curve.Keys.GetCount() > 0:
+                            curve.Keys.RemoveAt(0)
+            
+            # Clear animation from the specific component
+            remove_all_keys(anim_node)
+            
+        except Exception as e:
+            self.debug_print(f"Error clearing {property_name} animation: {str(e)}")
+    
+    def clear_joint_animation(self, joint):
+        """Clear all animation from a joint in the current take (for backward compatibility)"""
+        self.clear_property_animation(joint, "Translation")
+        self.clear_property_animation(joint, "Rotation")
+        self.clear_property_animation(joint, "Scaling")
+    
     def on_export(self):
         """Handle the export button click with reliable cleanup routines"""
         cleanup_required = False
@@ -1986,6 +2973,7 @@ class MotionBuilderExporter(QMainWindow):
                 "selections": selections_to_save,
                 "prefix": self.prefix_entry.text(),
                 "bake_animation": self.bake_anim_cb.isChecked(),
+                "export_full_hierarchy": hasattr(self, 'full_hierarchy_cb') and self.full_hierarchy_cb.isChecked(),
                 "export_log": self.export_log_cb.isChecked(),
                 "axis_conversion": {
                     "enabled": self.up_axis_combo.currentText() != "Y-up (None)",
@@ -2422,9 +3410,16 @@ class MotionBuilderExporter(QMainWindow):
         takes_export_info = {}
         total = len(export_items)
         
+        # Check if full hierarchy mode is enabled
+        full_hierarchy_mode = hasattr(self, 'full_hierarchy_cb') and self.full_hierarchy_cb.isChecked()
+        
         # Check if axis conversion is enabled based on dropdown selection
-        axis_conversion_enabled = self.up_axis_combo.currentText() != "Y-up (None)"
+        # Axis conversion is disabled if full hierarchy mode is enabled
+        axis_conversion_enabled = not full_hierarchy_mode and self.up_axis_combo.currentText() != "Y-up (None)"
         target_axis = self.up_axis_combo.currentText().replace(" (None)", "")
+        
+        self.debug_print(f"Export mode: {'Full Hierarchy' if full_hierarchy_mode else 'Normal'}")
+        self.debug_print(f"Axis conversion: {'Disabled (using full hierarchy)' if full_hierarchy_mode else ('Enabled: ' + target_axis if axis_conversion_enabled else 'Disabled')}")
         
         # Store original root state if axis conversion is enabled
         original_root_state = None
@@ -2451,37 +3446,83 @@ class MotionBuilderExporter(QMainWindow):
                 self.debug_print(f"Setting current take to: {take.Name}")
                 FBSystem().CurrentTake = take
                 
-                # Step 1: Bake animation FIRST if option is enabled
-                baked_animation = False
-                if self.bake_anim_cb.isChecked() and self.selected_nodes:
-                    self.debug_print("Baking Animation (plotting all skeleton joints)...")
-                    baked_animation = self.plot_all_skeleton_joints()
-                    if baked_animation:
-                        self.debug_print("Animation baking completed successfully")
-                    else:
-                        self.debug_print("WARNING: Animation baking failed or was incomplete")
-                        
-                # Step 2: Prepare root for export (handles constraints and/or axis conversion)
-                export_prep_data = None
-                if self.skeleton_root:
-                    self.debug_print(f"Preparing take '{take.Name}' for export...")
-                    # Apply axis conversion only if enabled
-                    if axis_conversion_enabled:
-                        export_prep_data = self.prepare_root_for_export(target_axis)
-                    else:
-                        export_prep_data = self.prepare_root_for_export(None)
+                # Different export process based on full hierarchy mode
+                if full_hierarchy_mode:
+                    # Full hierarchy mode - simpler export process
+                    self.debug_print("Using Full Hierarchy export mode...")
                     
-                    if not export_prep_data:
-                        export_prep_data = None
-                        self.debug_print("WARNING: Failed to prepare root for export")
-                
-                # Step 3: Export the file
-                file_name = (prefix if prefix else "") + take.Name + ".fbx"
-                export_path = os.path.join(export_folder, file_name)
-                self.debug_print(f"Exporting take: {take.Name} to {export_path}")
-                FBApplication().FileExport(export_path)
-                self.debug_print(f"Exported take: {take.Name} to {export_path}")
-                exported = True
+                    # Step 1: Bake animation if enabled
+                    baked_animation = False
+                    if self.bake_anim_cb.isChecked() and self.selected_nodes:
+                        self.debug_print("Baking Animation for full hierarchy...")
+                        
+                        # Set up plot options
+                        plot_options = FBPlotOptions()
+                        plot_options.ConstantKeyReducerKeepOneKey = True  # Keep at least one key per property
+                        plot_options.PlotAllTakes = False                 # Only plot current take
+                        plot_options.PlotOnFrame = True                   # Plot on each frame
+                        plot_options.PlotPeriod = FBTime(0, 0, 0, 1)      # 1 frame interval
+                        plot_options.PlotTranslationOnRootOnly = False    # Plot translation on all joints
+                        plot_options.PreciseTimeDiscontinuities = True    # Ensure accurate plotting at discontinuities
+                        plot_options.RotationFilterToApply = FBRotationFilter.kFBRotationFilterUnroll  # Use unroll filter
+                        plot_options.UseConstantKeyReducer = True         # Use key reducer
+                        
+                        # Plot the animation for all selected nodes
+                        try:
+                            FBSystem().CurrentTake.PlotTakeOnSelected(plot_options)
+                            baked_animation = True
+                            self.debug_print("Full hierarchy animation baking completed successfully")
+                        except Exception as e:
+                            self.debug_print(f"Error baking full hierarchy animation: {e}")
+                    
+                    # Step 2: Export the file (no need for special root preparation)
+                    file_name = (prefix if prefix else "") + take.Name + ".fbx"
+                    export_path = os.path.join(export_folder, file_name)
+                    self.debug_print(f"Exporting full hierarchy take: {take.Name} to {export_path}")
+                    FBApplication().FileExport(export_path)
+                    self.debug_print(f"Exported take: {take.Name} to {export_path}")
+                    exported = True
+                    
+                    # Step 3: Clean up (just clear animation keys if needed)
+                    if baked_animation:
+                        self.clear_animation_on_all_joints()
+                        
+                    # No additional cleanup needed for full hierarchy mode
+                    export_prep_data = None
+                        
+                else:
+                    # Normal export mode - use standard process
+                    # Step 1: Bake animation FIRST if option is enabled
+                    baked_animation = False
+                    if self.bake_anim_cb.isChecked() and self.selected_nodes:
+                        self.debug_print("Baking Animation (plotting all skeleton joints)...")
+                        baked_animation = self.plot_all_skeleton_joints()
+                        if baked_animation:
+                            self.debug_print("Animation baking completed successfully")
+                        else:
+                            self.debug_print("WARNING: Animation baking failed or was incomplete")
+                            
+                    # Step 2: Prepare root for export (handles constraints and/or axis conversion)
+                    export_prep_data = None
+                    if self.skeleton_root:
+                        self.debug_print(f"Preparing take '{take.Name}' for export...")
+                        # Apply axis conversion only if enabled
+                        if axis_conversion_enabled:
+                            export_prep_data = self.prepare_root_for_export(target_axis)
+                        else:
+                            export_prep_data = self.prepare_root_for_export(None)
+                        
+                        if not export_prep_data:
+                            export_prep_data = None
+                            self.debug_print("WARNING: Failed to prepare root for export")
+                    
+                    # Step 3: Export the file
+                    file_name = (prefix if prefix else "") + take.Name + ".fbx"
+                    export_path = os.path.join(export_folder, file_name)
+                    self.debug_print(f"Exporting take: {take.Name} to {export_path}")
+                    FBApplication().FileExport(export_path)
+                    self.debug_print(f"Exported take: {take.Name} to {export_path}")
+                    exported = True
                 
                 # Add successfully exported file to the list for post-processing
                 if exported and os.path.exists(export_path):
