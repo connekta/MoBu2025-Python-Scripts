@@ -14,12 +14,23 @@ import os
 import json
 import sys
 import tempfile
+import traceback
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QCheckBox, QLineEdit, QGroupBox, 
                              QScrollArea, QProgressBar, QFileDialog, QFrame, QMessageBox,
                              QSizePolicy, QToolButton, QGridLayout, QDialog, QComboBox)
+
+# Try to import FBX SDK for axis conversion
+try:
+    import fbx
+    FBX_SDK_AVAILABLE = True
+    # Since we integrated the converter code, we're available if FBX SDK is available
+    FBX_CONVERTER_AVAILABLE = True
+except ImportError:
+    FBX_SDK_AVAILABLE = False
+    FBX_CONVERTER_AVAILABLE = False
 from PySide6.QtCore import Qt, QSize, Signal, Slot, QTimer
-from PySide6.QtGui import QFont, QIcon, QColor
+from PySide6.QtGui import QFont, QIcon, QColor, QDoubleValidator
 
 from pyfbsdk import FBApplication, FBSystem, FBMessageBox, FBModelList, FBModel, FBGetSelectedModels, FBFindModelByLabelName, FBTime, FBAnimationNode
 from pyfbsdk import FBModelNull, FBVector3d, FBConstraintManager, FBPlotOptions, FBRotationFilter, FBBeginChangeAllModels, FBEndChangeAllModels
@@ -174,20 +185,25 @@ class MotionBuilderExporter(QMainWindow):
         # Store references to collapsible groups for later updating
         self.group_boxes = {}
         
-        # Debug flag - set to True to enable print statements
+        # Debug flag - set to False to disable print statements
         self.debug = False
+        
+        # List to track exported files for post-processing
+        self.exported_files = []
         
         self.init_ui()
     
     def debug_print(self, message):
         """Print message only if debug is enabled"""
         if self.debug:
-            pass  # Disabled for performance
+            print(f"[FBXExporter] {message}")
         
     def init_ui(self):
         """Initialize the main window UI"""
         self.setWindowTitle("MotionBuilder Animation Exporter")
-        self.resize(710, 600)  # Increase width by 10px instead of 75px
+        self.resize(750, 650)  # Slightly larger default size
+        self.setMinimumWidth(750)  # Increased minimum width
+        self.setMinimumHeight(550)  # Increased minimum height to ensure options are visible
         
         # Set window to stay on top of parent only (not all windows)
         if self.parent():
@@ -242,6 +258,29 @@ class MotionBuilderExporter(QMainWindow):
         """Handle timer events to check for scene changes"""
         if FBApplication().FBXFileName != self.current_fbx:
             self.close()
+            
+    def update_rotation_inputs_state(self):
+        """Update the state of rotation input fields based on current axis selection"""
+        if not hasattr(self, 'x_rotation_input'):
+            return
+            
+        is_manual = self.up_axis_combo.currentText() == "Manual Rotations"
+        
+        # Enable/disable rotation inputs
+        self.x_rotation_input.setEnabled(is_manual)
+        self.y_rotation_input.setEnabled(is_manual)
+        self.z_rotation_input.setEnabled(is_manual)
+        
+        # Set default values based on selected preset
+        if not is_manual:
+            if self.up_axis_combo.currentText() == "Y-up (None)":
+                self.x_rotation_input.setText("0.0")
+                self.y_rotation_input.setText("0.0")
+                self.z_rotation_input.setText("0.0")
+            elif self.up_axis_combo.currentText() == "Z-up":
+                self.x_rotation_input.setText("-90.0")
+                self.y_rotation_input.setText("0.0")
+                self.z_rotation_input.setText("0.0")
     
     def get_settings_file(self):
         """Determine the appropriate settings file path based on current scene"""
@@ -619,8 +658,8 @@ class MotionBuilderExporter(QMainWindow):
             capture_constraint.ReferenceAdd(0, capture_null)  # Child
             capture_constraint.ReferenceAdd(1, self.skeleton_root)  # Parent
             
-            # Snap and activate
-            capture_constraint.Snap = True
+            # Do not use Snap to ensure null exactly matches root with no offset
+            capture_constraint.Snap = False
             capture_constraint.Active = True
             
             # Plot the capture null (with constraints still active on root)
@@ -656,6 +695,8 @@ class MotionBuilderExporter(QMainWindow):
                 restore_constraint.ReferenceAdd(0, self.skeleton_root)  # Child
                 restore_constraint.ReferenceAdd(1, capture_null)  # Parent
                 
+                # Do NOT use Snap - we want to transfer the exact animation without offset
+                restore_constraint.Snap = False
                 restore_constraint.Active = True
                 
                 # Plot the root
@@ -685,30 +726,36 @@ class MotionBuilderExporter(QMainWindow):
             return None
     
     def apply_axis_conversion_to_root(self, capture_null, target_axis):
-        """Apply Y-up to Z-up rotation to an already prepared root"""
+        """Apply axis rotation to an already prepared root"""
         if not self.skeleton_root or not capture_null:
             return False
             
         try:
-            # Only apply rotation if we're actually converting axes
-            if target_axis == "Y-up":
-                # No conversion needed if already Y-up
-                return True
-                
             # Create axis conversion null
             axis_null = FBModelNull("TEMP_AXIS_PARENT")
             axis_null.Show = False
             
             # Set rotation based on target axis
-            if target_axis == "Z-down":
-                # Current implementation - results in upside down character
-                axis_null.Rotation = FBVector3d(-90.0, 0.0, 0.0)
+            if target_axis == "Y-up":
+                # For Y-up, apply 0 rotation (identity transform)
+                axis_null.Rotation = FBVector3d(0.0, 0.0, 0.0)
             elif target_axis == "Z-up":
-                # Add 180° Y rotation to flip character right-side up
-                axis_null.Rotation = FBVector3d(-90.0, 180.0, 0.0)
-            else:
-                # Default to Z-down behavior
+                # Apply only X rotation for Z-up (no Y rotation)
                 axis_null.Rotation = FBVector3d(-90.0, 0.0, 0.0)
+            elif target_axis == "Manual Rotations":
+                # Get values from rotation input fields
+                try:
+                    x_rot = float(self.x_rotation_input.text())
+                    y_rot = float(self.y_rotation_input.text())
+                    z_rot = float(self.z_rotation_input.text())
+                    axis_null.Rotation = FBVector3d(x_rot, y_rot, z_rot)
+                except ValueError:
+                    # Default to Z-up rotation if there's an error parsing values
+                    self.debug_print("Error parsing rotation values, using default Z-up rotation")
+                    axis_null.Rotation = FBVector3d(-90.0, 0.0, 0.0)
+            else:
+                # Default to no rotation for any undefined axis
+                axis_null.Rotation = FBVector3d(0.0, 0.0, 0.0)
             
             # Parent the capture null to the axis null
             player_control = FBPlayerControl()
@@ -728,6 +775,8 @@ class MotionBuilderExporter(QMainWindow):
             final_constraint.ReferenceAdd(0, self.skeleton_root)  # Child
             final_constraint.ReferenceAdd(1, capture_null)  # Parent
             
+            # Do NOT use Snap - we want to transfer the exact rotation without offset
+            final_constraint.Snap = False
             final_constraint.Active = True
             FBSystem().Scene.Evaluate()
             
@@ -770,6 +819,8 @@ class MotionBuilderExporter(QMainWindow):
             capture_null = export_data.get('capture_null')
             has_constraints = export_data.get('has_constraints', False)
             disabled_constraints = export_data.get('disabled_constraints', [])
+            unparented = export_data.get('unparented', False)
+            backup_null = export_data.get('backup_null')
             
             # Clean up capture null
             if capture_null:
@@ -783,6 +834,22 @@ class MotionBuilderExporter(QMainWindow):
                 
                 # Re-enable the constraints
                 self.restore_constraints(disabled_constraints)
+            
+            # Reparent the skeleton root if it was unparented
+            if unparented:
+                try:
+                    self.reparent_skeleton_root()
+                    self.debug_print("Successfully reparented skeleton root during cleanup")
+                except Exception as e:
+                    self.debug_print(f"Warning: Error reparenting skeleton root: {e}")
+            
+            # Restore the original animation from the backup null
+            if backup_null:
+                try:
+                    self.restore_original_root_animation(backup_null)
+                    self.debug_print("Successfully restored original root animation during cleanup")
+                except Exception as e:
+                    self.debug_print(f"Warning: Error restoring original root animation: {e}")
             
         except Exception as e:
             # print(f"Error during cleanup: {e}")
@@ -877,26 +944,145 @@ class MotionBuilderExporter(QMainWindow):
         
         # print("=== RESTORE CONSTRAINTS COMPLETE ===")
     
+    def store_original_root_animation(self):
+        """Store the original root animation to a null for later restoration"""
+        if not self.skeleton_root:
+            return None
+            
+        try:
+            # Create a backup null to store the original animation
+            backup_null = FBModelNull("TEMP_ORIGINAL_BACKUP")
+            backup_null.Show = False
+            
+            # Create constraint to capture the root's original animation
+            constraint_manager = FBConstraintManager()
+            backup_constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+            backup_constraint.Name = "TEMP_BACKUP_CONSTRAINT"
+            
+            # Set references (child = backup null, parent = root)
+            backup_constraint.ReferenceAdd(0, backup_null)  # Child
+            backup_constraint.ReferenceAdd(1, self.skeleton_root)  # Parent
+            
+            # Do not use Snap to ensure exact copy
+            backup_constraint.Snap = False
+            backup_constraint.Active = True
+            
+            # Plot the backup null to capture the animation
+            FBBeginChangeAllModels()
+            for model in self.selected_nodes:
+                model.Selected = False
+            backup_null.Selected = True
+            FBEndChangeAllModels()
+            
+            plot_options = FBPlotOptions()
+            plot_options.ConstantKeyReducerKeepOneKey = False
+            plot_options.PlotAllTakes = False
+            plot_options.PlotOnFrame = True
+            plot_options.PlotPeriod = FBTime(0, 0, 0, 1)
+            plot_options.UseConstantKeyReducer = False
+            
+            FBSystem().CurrentTake.PlotTakeOnSelected(plot_options)
+            
+            # Remove the backup constraint
+            backup_constraint.Active = False
+            backup_constraint.FBDelete()
+            
+            self.debug_print("Successfully stored original root animation to backup null")
+            return backup_null
+            
+        except Exception as e:
+            self.debug_print(f"Error storing original root animation: {e}")
+            return None
+    
+    def restore_original_root_animation(self, backup_null):
+        """Restore the original root animation from the backup null"""
+        if not self.skeleton_root or not backup_null:
+            return False
+            
+        try:
+            self.debug_print("Restoring original root animation from backup null")
+            
+            # Create constraint from backup null to root
+            constraint_manager = FBConstraintManager()
+            restore_constraint = constraint_manager.TypeCreateConstraint("Parent/Child")
+            restore_constraint.Name = "TEMP_RESTORE_ORIGINAL_CONSTRAINT"
+            
+            # Set references (child = root, parent = backup null)
+            restore_constraint.ReferenceAdd(0, self.skeleton_root)  # Child
+            restore_constraint.ReferenceAdd(1, backup_null)  # Parent
+            
+            # Do not use Snap to ensure exact transfer
+            restore_constraint.Snap = False
+            restore_constraint.Active = True
+            
+            # Plot the root to restore original animation
+            FBBeginChangeAllModels()
+            for model in self.selected_nodes:
+                model.Selected = False
+            self.skeleton_root.Selected = True
+            FBEndChangeAllModels()
+            
+            plot_options = FBPlotOptions()
+            plot_options.ConstantKeyReducerKeepOneKey = False
+            plot_options.PlotAllTakes = False
+            plot_options.PlotOnFrame = True
+            plot_options.PlotPeriod = FBTime(0, 0, 0, 1)
+            plot_options.UseConstantKeyReducer = False
+            
+            FBSystem().CurrentTake.PlotTakeOnSelected(plot_options)
+            
+            # Clean up restore constraint
+            restore_constraint.Active = False
+            restore_constraint.FBDelete()
+            
+            # Clean up backup null
+            backup_null.Selected = False
+            backup_null.FBDelete()
+            
+            self.debug_print("Successfully restored original root animation")
+            return True
+            
+        except Exception as e:
+            self.debug_print(f"Error restoring original root animation: {e}")
+            return False
+    
     def prepare_root_for_export(self, target_axis=None):
         """Prepare the root for export with optional axis conversion"""
         if not self.skeleton_root:
             return None
             
         try:
-            # First, handle constraint-based plotting (always done)
+            # First, store the original root animation for later restoration
+            backup_null = self.store_original_root_animation()
+            
+            # Next, handle constraint-based plotting (always done)
             export_data = self.prepare_constrained_root_for_export()
             if not export_data:
                 return None
+                
+            # Store the backup null for restoration after export
+            export_data['backup_null'] = backup_null
+                
+            # Now unparent the root AFTER animation is captured
+            unparented = False
+            try:
+                if self.unparent_skeleton_root():
+                    unparented = True
+                    self.debug_print("Successfully unparented skeleton root after animation capture")
+            except Exception as e:
+                self.debug_print(f"Warning: Error unparenting skeleton root: {e}")
             
-            # Apply axis conversion if specified
-            if target_axis and target_axis != "Y-up":
-                capture_null = export_data.get('capture_null')
-                if capture_null:
-                    success = self.apply_axis_conversion_to_root(capture_null, target_axis)
-                    if not success:
-                        # Clean up on failure
-                        self.cleanup_after_export(export_data)
-                        return None
+            # Store the unparenting status in export_data
+            export_data['unparented'] = unparented
+            
+            # Always apply axis conversion, using 0 rotation for Y-up
+            capture_null = export_data.get('capture_null')
+            if capture_null:
+                success = self.apply_axis_conversion_to_root(capture_null, target_axis)
+                if not success:
+                    # Clean up on failure
+                    self.cleanup_after_export(export_data)
+                    return None
             
             return export_data
             
@@ -931,13 +1117,12 @@ class MotionBuilderExporter(QMainWindow):
         browse_button.clicked.connect(self.on_global_browse)
         folder_layout.addWidget(browse_button)
         
-        self.options_btn = QToolButton()
-        self.options_btn.setText("⚙")
-        self.options_btn.setAutoRaise(True)
-        self.options_btn.setFixedSize(QSize(24, 24))
-        self.options_btn.setCheckable(True)  # Make it checkable
-        self.options_btn.clicked.connect(self.toggle_options)
-        folder_layout.addWidget(self.options_btn)
+        # Add information button
+        info_button = QPushButton("ℹ")
+        info_button.setFixedSize(24, 24)
+        info_button.setToolTip("Show help information")
+        info_button.clicked.connect(self.show_help_dialog)
+        folder_layout.addWidget(info_button)
         
         parent_layout.addWidget(folder_frame)
     
@@ -952,11 +1137,61 @@ class MotionBuilderExporter(QMainWindow):
             self.full_export_folder = folder
             self.folder_entry.setText(self.truncate_path(folder))
     
+    def get_collapsible_group_style(self):
+        """Get the style for collapsible group boxes"""
+        return """
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+                margin-top: 6px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QGroupBox:hover::title {
+                color: #cccccc;
+            }
+        """
+    
+    def get_inner_group_style(self):
+        """Get the style for inner group boxes"""
+        return """
+            QGroupBox {
+                font-weight: normal;
+                border: 1px solid #888888;
+                border-radius: 3px;
+                margin-top: 6px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+        """
+        
     def create_options_panel(self, parent_layout):
-        """Create simplified export options panel"""
+        """Create collapsible export options panel"""
+        # Get saved options expanded state, default to True (expanded) for first use
+        settings = self.load_settings()
+        expanded = settings.get("options_expanded", True)
+        
+        # Create collapsible group for options
+        self.options_group = QGroupBox("▼ Export Options" if expanded else "► Export Options")
+        self.options_group.setStyleSheet(self.get_collapsible_group_style())
+        self.options_group.mousePressEvent = lambda event: self.toggle_options_group()
+        self.options_group_expanded = expanded
+        
+        # Create options container widget
         self.options_widget = QWidget()
         options_layout = QGridLayout(self.options_widget)
-        options_layout.setContentsMargins(0, 0, 0, 0)
+        options_layout.setContentsMargins(5, 5, 5, 5)
         
         # File prefix
         prefix_label = QLabel("Filename Prefix:")
@@ -975,7 +1210,10 @@ class MotionBuilderExporter(QMainWindow):
         
         # Animation options
         anim_group = QGroupBox("Animation Options")
+        anim_group.setStyleSheet(self.get_inner_group_style())
         anim_layout = QHBoxLayout(anim_group)
+        anim_layout.setContentsMargins(10, 5, 10, 5)  # Reduced vertical margins
+        anim_layout.setSpacing(10)  # Reduced spacing
         
         self.bake_anim_cb = QCheckBox("Bake Animation")
         self.bake_anim_cb.setChecked(self.load_settings().get("bake_animation", True))
@@ -985,58 +1223,150 @@ class MotionBuilderExporter(QMainWindow):
         self.export_log_cb.setChecked(self.load_settings().get("export_log", True))
         anim_layout.addWidget(self.export_log_cb)
         
+        # Add a stretch to push checkboxes to the left
+        anim_layout.addStretch(1)
+        
+        # Set a fixed size height to reduce empty space
+        anim_group.setFixedHeight(60)
+        
         options_layout.addWidget(anim_group, 1, 0, 1, 3)
         
         # Axis conversion options
         axis_group = QGroupBox("Axis Conversion")
+        axis_group.setStyleSheet(self.get_inner_group_style())
         axis_layout = QGridLayout(axis_group)
+        axis_layout.setContentsMargins(10, 5, 10, 5)  # Reduced vertical margins
+        axis_layout.setSpacing(5)  # Reduced spacing
         
-        self.axis_conversion_cb = QCheckBox("Convert Axis")
-        self.axis_conversion_cb.setChecked(self.load_settings().get("axis_conversion", {}).get("enabled", False))
-        axis_layout.addWidget(self.axis_conversion_cb, 0, 0)
+        # FBX SDK Axis Conversion option - NOW FIRST
+        sdk_axis_label = QLabel("FBX SDK Axis Conversion:")
+        enabled = FBX_SDK_AVAILABLE
+        sdk_axis_label.setEnabled(enabled)
+        if not enabled:
+            sdk_axis_label.setStyleSheet("color: gray;")
+            sdk_axis_label.setToolTip("FBX SDK not installed - SDK axis conversion unavailable")
+        axis_layout.addWidget(sdk_axis_label, 0, 0)
         
-        axis_label = QLabel("Target Up Axis:")
-        axis_layout.addWidget(axis_label, 0, 1)
+        self.sdk_up_axis_combo = QComboBox()
+        self.sdk_up_axis_combo.addItems(["Y-up (None)", "Z-up"])
+        # Get saved value, default to Y-up (None)
+        saved_sdk_axis = self.load_settings().get("fbx_sdk_axis_conversion", {}).get("target_axis", "Y-up")
+        # Force to Y-up unless explicitly enabled with a different value
+        if not self.load_settings().get("fbx_sdk_axis_conversion", {}).get("enabled", False):
+            saved_sdk_axis = "Y-up"  # Force to Y-up if not enabled
+            
+        # Handle Z-down in previous settings (now removed), default to Z-up
+        if saved_sdk_axis == "Z-down":
+            saved_sdk_axis = "Z-up"
+            
+        self.sdk_up_axis_combo.setCurrentText("Y-up (None)" if saved_sdk_axis == "Y-up" else saved_sdk_axis)
+        self.sdk_up_axis_combo.setEnabled(enabled)
+        if not enabled:
+            # Gray out dropdown with clear message when FBX SDK is not available
+            self.sdk_up_axis_combo.setStyleSheet("color: gray; background-color: #eeeeee;")
+            self.sdk_up_axis_combo.setToolTip("FBX SDK not installed - Please install FBX SDK to use this feature")
+        axis_layout.addWidget(self.sdk_up_axis_combo, 0, 1)
+        
+        # Plotted Axis Conversion - NOW SECOND
+        axis_label = QLabel("Plotted Axis Conversion:")
+        axis_layout.addWidget(axis_label, 1, 0)
         
         self.up_axis_combo = QComboBox()
-        self.up_axis_combo.addItems(["Y-up", "Z-up", "Z-down"])
-        # Default to Z-down for axis conversion (since MotionBuilder is already Y-up)
-        self.up_axis_combo.setCurrentText(self.load_settings().get("axis_conversion", {}).get("target_axis", "Z-down"))
-        axis_layout.addWidget(self.up_axis_combo, 0, 2)
+        self.up_axis_combo.addItems(["Y-up (None)", "Z-up", "Manual Rotations"])
+        # Get saved value, default to Y-up (None)
+        saved_axis = self.load_settings().get("axis_conversion", {}).get("target_axis", "Y-up")
+        # Force to Y-up unless explicitly enabled with a different value
+        if not self.load_settings().get("axis_conversion", {}).get("enabled", False):
+            saved_axis = "Y-up"  # Force to Y-up if not enabled
+            
+        # Handle Z-down in previous settings, convert to Manual Rotations
+        if saved_axis == "Z-down":
+            saved_axis = "Manual Rotations"
+            
+        self.up_axis_combo.setCurrentText("Y-up (None)" if saved_axis == "Y-up" else saved_axis)
+        axis_layout.addWidget(self.up_axis_combo, 1, 1)
         
-        # Connect combo box change to auto-toggle checkbox
-        self.up_axis_combo.currentTextChanged.connect(self.on_axis_combo_changed)
+        # Add rotation input fields
+        rotation_frame = QWidget()
+        rotation_layout = QHBoxLayout(rotation_frame)
+        rotation_layout.setContentsMargins(0, 5, 0, 0)
         
-        # Initialize checkbox state based on current selection
-        self.on_axis_combo_changed(self.up_axis_combo.currentText())
+        rotation_label = QLabel("Manual Rotation (X, Y, Z):")
+        rotation_layout.addWidget(rotation_label)
         
+        # Get manual rotation values from settings
+        saved_manual_rotation = self.load_settings().get("axis_conversion", {}).get("manual_rotation", {})
+        default_x = saved_manual_rotation.get("x", -90.0) if saved_axis == "Manual Rotations" else 0.0
+        default_y = saved_manual_rotation.get("y", 0.0)
+        default_z = saved_manual_rotation.get("z", 0.0)
+        
+        # X rotation
+        self.x_rotation_input = QLineEdit()
+        self.x_rotation_input.setFixedWidth(50)
+        self.x_rotation_input.setValidator(QDoubleValidator())
+        self.x_rotation_input.setText(str(default_x))
+        rotation_layout.addWidget(self.x_rotation_input)
+        
+        # Y rotation
+        self.y_rotation_input = QLineEdit()
+        self.y_rotation_input.setFixedWidth(50)
+        self.y_rotation_input.setValidator(QDoubleValidator())
+        self.y_rotation_input.setText(str(default_y))
+        rotation_layout.addWidget(self.y_rotation_input)
+        
+        # Z rotation
+        self.z_rotation_input = QLineEdit()
+        self.z_rotation_input.setFixedWidth(50)
+        self.z_rotation_input.setValidator(QDoubleValidator())
+        self.z_rotation_input.setText(str(default_z))
+        rotation_layout.addWidget(self.z_rotation_input)
+        
+        axis_layout.addWidget(rotation_frame, 2, 0, 1, 2)
+        
+        # Set initial state of rotation inputs
+        self.update_rotation_inputs_state()
+        
+        # Connect signal to update state when selection changes
+        self.up_axis_combo.currentTextChanged.connect(self.update_rotation_inputs_state)
+        
+        # Set fixed height for the axis group
+        axis_group.setFixedHeight(130)
         
         options_layout.addWidget(axis_group, 2, 0, 1, 3)
         
         # Skeleton info
         skeleton_group = QGroupBox("Skeleton Information")
+        skeleton_group.setStyleSheet(self.get_inner_group_style())
         skeleton_layout = QVBoxLayout(skeleton_group)
+        skeleton_layout.setContentsMargins(10, 5, 10, 5)  # Reduced vertical margins
         
         self.skeleton_info_label = QLabel("Skeleton Root: Not detected\nSelected Nodes: 0")
         skeleton_layout.addWidget(self.skeleton_info_label)
         
+        # Set fixed height for the skeleton group
+        skeleton_group.setFixedHeight(60)
+        
         options_layout.addWidget(skeleton_group, 3, 0, 1, 3)
         
-        parent_layout.addWidget(self.options_widget)
+        # Add options widget to group
+        group_layout = QVBoxLayout(self.options_group)
+        group_layout.setContentsMargins(10, 20, 10, 10)  # Add top margin for title
+        group_layout.setSpacing(0)
+        group_layout.addWidget(self.options_widget)
         
-        # Initially hide options
-        self.options_widget.hide()
+        # Set initial visibility based on saved state
+        self.options_widget.setVisible(self.options_group_expanded)
         
-    def on_axis_combo_changed(self, axis_text):
-        """Handle axis combo box changes - auto toggle checkbox and enable/disable it"""
-        if axis_text == "Y-up":
-            # Y-up is MotionBuilder's default, so disable conversion
-            self.axis_conversion_cb.setChecked(False)
-            self.axis_conversion_cb.setEnabled(False)
+        # Adjust height if collapsed
+        if not self.options_group_expanded:
+            self.options_group.setFixedHeight(30)
         else:
-            # Any other axis needs conversion
-            self.axis_conversion_cb.setChecked(True)
-            self.axis_conversion_cb.setEnabled(True)
+            self.options_group.setMaximumHeight(16777215)
+        
+        # Add group to parent layout
+        parent_layout.addWidget(self.options_group)
+        
+    # Removed on_axis_combo_changed and on_sdk_axis_combo_changed as we no longer use checkboxes
         
     def open_settings_file(self):
         """Open the settings JSON file in the default text editor"""
@@ -1061,20 +1391,119 @@ class MotionBuilderExporter(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open settings file: {e}")
     
-    def toggle_options(self):
+    def toggle_options_group(self):
         """Toggle visibility of options panel"""
-        is_visible = not self.options_widget.isVisible()
-        self.options_widget.setVisible(is_visible)
+        self.options_group_expanded = not self.options_group_expanded
         
-        # Update button appearance based on state
-        if is_visible:
-            self.options_btn.setStyleSheet("background-color: #404040; border-radius: 3px;")
-        else:
-            self.options_btn.setStyleSheet("")
+        # Update arrow indicator
+        title = self.options_group.title()
+        if self.options_group_expanded:
+            # Expand the options
+            self.options_group.setTitle(title.replace("►", "▼"))
+            self.options_group.setMaximumHeight(16777215)  # Default maximum height
             
-        # Keep the checked state matching the visibility
-        self.options_btn.setChecked(is_visible)
+            # Set explicit height for visibility
+            self.options_widget.setMinimumHeight(350)
+            
+            # Show content AFTER setting sizes
+            self.options_widget.setVisible(True)
+            
+            # Force layout update
+            QApplication.processEvents()
+            
+            # Now adjust the window size to accommodate content
+            # First get the minimum required height
+            required_height = self.options_group.sizeHint().height() + 350  # Add buffer for other content
+            
+            # Check the current window height
+            current_height = self.height()
+            if current_height < required_height:
+                # Resize window to fit content
+                self.resize(self.width(), required_height)
+        else:
+            # Collapse the options
+            self.options_group.setTitle(title.replace("▼", "►"))
+            self.options_widget.setVisible(False)
+            self.options_group.setFixedHeight(30)
+            
+        # Save state to settings
+        settings = self.load_settings()
+        settings["options_expanded"] = self.options_group_expanded
+        self.save_settings(settings)
     
+    def show_help_dialog(self):
+        """Show help information dialog"""
+        help_dialog = QDialog(self)
+        help_dialog.setWindowTitle("FBX Exporter Help")
+        help_dialog.setFixedSize(600, 400)
+        
+        layout = QVBoxLayout(help_dialog)
+        
+        # Create a scroll area to ensure content fits
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        
+        # Create content widget for the scroll area
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        
+        # Help content using HTML formatting
+        help_text = """<html>
+        <h3>FBX Exporter - Quick Guide</h3>
+        
+        <p><b>Global Export Folder:</b> Base directory where exports will be saved. Uses groups for organization.</p>
+        
+        <p><b>File Prefix:</b> Optional prefix added to all exported filenames.</p>
+        
+        <h4>Animation Options</h4>
+        <p><b>Bake Animation:</b> When enabled, plots animation for all skeleton joints before export using Unroll filter, making it independent of constraints and resulting in smoother rotations. After export, animation keys are removed to reduce scene size.</p>
+        <p><b>Show Export Log:</b> Displays a summary of exports after completion.</p>
+        
+        <h4>Axis Conversion</h4>
+        <p><b>FBX SDK Axis Conversion:</b> Uses FBX SDK to convert axis system <i>after</i> export. Recommended for compatibility with software expecting Z-up axis systems. Doesn't modify the scene.</p>
+        
+        <p><b>Plotted Axis Conversion:</b> Uses constraints to temporarily rotate the skeleton during export. This method plots the animation in the new orientation before export.</p>
+        
+        <p><b>Rotation Presets:</b></p>
+        <ul>
+            <li><b>Y-up (None):</b> No rotation applied (X=0, Y=0, Z=0)</li>
+            <li><b>Z-up:</b> Rotates around X-axis to convert Y-up to Z-up (X=-90, Y=0, Z=0)</li>
+            <li><b>Manual Rotations:</b> Use custom rotation values from the X, Y, Z input fields</li>
+        </ul>
+        
+        <h4>Takes</h4>
+        <p>Select takes to export by checking them in the list. Use groups (==Group Name==) to organize takes and define separate export locations.</p>
+        <p>Toggle groups by clicking their header. Toggle all takes with the "Toggle All" button.</p>
+        
+        <p><i>Click Export to process all selected takes according to these settings.</i></p>
+        </html>"""
+        
+        help_label = QLabel(help_text)
+        help_label.setWordWrap(True)
+        help_label.setTextFormat(Qt.RichText)
+        content_layout.addWidget(help_label)
+        
+        # Add some spacing at the bottom
+        content_layout.addStretch(1)
+        
+        # Set the content widget in the scroll area
+        scroll_area.setWidget(content_widget)
+        layout.addWidget(scroll_area)
+        
+        # Add a close button
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(help_dialog.accept)
+        close_button.setMaximumWidth(100)
+        close_button_layout = QHBoxLayout()
+        close_button_layout.addStretch(1)
+        close_button_layout.addWidget(close_button)
+        close_button_layout.addStretch(1)
+        layout.addLayout(close_button_layout)
+        
+        # Show the dialog as modal
+        help_dialog.exec_()
+        
     def select_skeleton_hierarchy(self):
         """Select the Skeleton Root node and all its Skeleton Node children using a simpler approach"""
         selection = FBModelList()
@@ -1510,21 +1939,14 @@ class MotionBuilderExporter(QMainWindow):
     def on_export(self):
         """Handle the export button click with reliable cleanup routines"""
         cleanup_required = False
+        # Initialize this variable here to ensure it's defined in all code paths
+        sdk_axis_conversion_summary = None
         try:
-            # print("Starting export process")
+            self.debug_print("Starting export process")
             if not self.select_skeleton_hierarchy():
-                # print("Failed to select skeleton hierarchy")
+                self.debug_print("Failed to select skeleton hierarchy")
                 QMessageBox.warning(self, "Export Warning", "Failed to select skeleton hierarchy.")
                 return
-                
-            try:
-                if self.unparent_skeleton_root():
-                    cleanup_required = True
-                    # print("Successfully unparented skeleton root")
-                
-            except Exception as e:
-                # print(f"Warning: Error unparenting skeleton root: {e}")
-                QMessageBox.warning(self, "Export Warning", f"Error preparing skeleton: {e}")
             
             export_items = []
             selections_to_save = {}
@@ -1566,8 +1988,17 @@ class MotionBuilderExporter(QMainWindow):
                 "bake_animation": self.bake_anim_cb.isChecked(),
                 "export_log": self.export_log_cb.isChecked(),
                 "axis_conversion": {
-                    "enabled": self.axis_conversion_cb.isChecked(),
-                    "target_axis": self.up_axis_combo.currentText()
+                    "enabled": self.up_axis_combo.currentText() != "Y-up (None)",
+                    "target_axis": self.up_axis_combo.currentText().replace(" (None)", ""),
+                    "manual_rotation": {
+                        "x": float(self.x_rotation_input.text() or 0),
+                        "y": float(self.y_rotation_input.text() or 0),
+                        "z": float(self.z_rotation_input.text() or 0)
+                    }
+                },
+                "fbx_sdk_axis_conversion": {
+                    "enabled": self.sdk_up_axis_combo.currentText() != "Y-up (None)",
+                    "target_axis": self.sdk_up_axis_combo.currentText().replace(" (None)", "")
                 },
                 "takes": {}
             }
@@ -1605,33 +2036,395 @@ class MotionBuilderExporter(QMainWindow):
                     label.setText(new_mark)
             
             if self.export_log_cb.isChecked():
-                self.open_export_log(updated_settings)
+                self.open_export_log(updated_settings, sdk_axis_conversion_summary)
         
         except Exception as e:
             # print(f"Error during export process: {e}")
             QMessageBox.critical(self, "Export Error", f"Error during export process: {e}")
         finally:
-            try:
-                # Reparent the skeleton root
-                if cleanup_required:
-                    # print("Reparenting skeleton root in finally block")
-                    self.reparent_skeleton_root()
-            except Exception as e:
-                pass  # Error handling disabled for performance
+            # No need to reparent here anymore as it's now handled in cleanup_after_export
+            pass
     
+    def convert_fbx_axes(self, file_path, target_axis="Z-up", output_path=None, fbx_version=None):
+        """Convert the axis system of an FBX file using the FBX Python SDK (integrated version)"""
+        # Check if FBX SDK is available
+        if not FBX_SDK_AVAILABLE:
+            self.debug_print(f"Error: FBX SDK not available")
+            return False
+
+        if not os.path.exists(file_path):
+            self.debug_print(f"Error: File does not exist: {file_path}")
+            return False
+            
+        if output_path is None:
+            output_path = file_path
+        
+        try:
+            # Initialize the FBX SDK
+            sdk_manager = fbx.FbxManager.Create()
+            if not sdk_manager:
+                self.debug_print("Error: Unable to create FBX Manager")
+                return False
+            
+            self.debug_print("FBX SDK Manager created successfully.")
+            
+            # Create an IO settings object
+            ios = fbx.FbxIOSettings.Create(sdk_manager, fbx.IOSROOT)
+            sdk_manager.SetIOSettings(ios)
+            
+            # Create an importer
+            importer = fbx.FbxImporter.Create(sdk_manager, "")
+            
+            # Initialize the importer
+            if not importer.Initialize(file_path, -1, sdk_manager.GetIOSettings()):
+                error_msg = f"Error: Unable to initialize importer for {file_path}"
+                if hasattr(importer, 'GetStatus') and hasattr(importer.GetStatus(), 'GetErrorString'):
+                    error_msg += f"\n{importer.GetStatus().GetErrorString()}"
+                self.debug_print(error_msg)
+                importer.Destroy()
+                sdk_manager.Destroy()
+                return False
+            
+            self.debug_print("FBX importer initialized successfully")
+            
+            # Create a new scene
+            scene = fbx.FbxScene.Create(sdk_manager, "Scene")
+            
+            # Import the contents of the file into the scene
+            importer.Import(scene)
+            importer.Destroy()
+            
+            self.debug_print("FBX file imported successfully")
+            
+            # Get the current axis system
+            global_settings = scene.GetGlobalSettings()
+            current_axis = global_settings.GetAxisSystem()
+            
+            # Create the target axis system
+            target_axis_system = None
+            
+            if target_axis == "Y-up":
+                # MotionBuilder default: Y-up, Z-front, X-right
+                target_axis_system = fbx.FbxAxisSystem(
+                    fbx.FbxAxisSystem.EUpVector.eYAxis,
+                    fbx.FbxAxisSystem.EFrontVector.eParityOdd,
+                    fbx.FbxAxisSystem.ECoordSystem.eRightHanded
+                )
+                self.debug_print("Created Y-up axis system")
+            elif target_axis == "Z-up":
+                # Z-up, Y-front, X-right
+                target_axis_system = fbx.FbxAxisSystem(
+                    fbx.FbxAxisSystem.EUpVector.eZAxis,
+                    fbx.FbxAxisSystem.EFrontVector.eParityOdd,
+                    fbx.FbxAxisSystem.ECoordSystem.eRightHanded
+                )
+                self.debug_print("Created Z-up axis system")
+            else:
+                error_msg = f"Error: Unknown target axis: {target_axis}"
+                self.debug_print(error_msg)
+                sdk_manager.Destroy()
+                return False
+            
+            # Convert the scene to the new axis system
+            target_axis_system.ConvertScene(scene)
+            
+            # Create an exporter
+            exporter = fbx.FbxExporter.Create(sdk_manager, "")
+            
+            # Set up export options including FBX version
+            io_settings = sdk_manager.GetIOSettings()
+            
+            # Set FBX file format version if specified
+            if fbx_version:
+                # Try to set version using the string directly
+                try:
+                    self.debug_print(f"Setting FBX version to {fbx_version} using string value")
+                    io_settings.SetEnumProp(fbx.EExportFormat.eExportFormatFBX, "FBXExportFileVersion", fbx_version)
+                except Exception as e:
+                    self.debug_print(f"Warning: Failed to set FBX version {fbx_version}: {e}")
+                    self.debug_print("Continuing with default version")
+            
+            # Initialize the exporter
+            if not exporter.Initialize(output_path, -1, io_settings):
+                error_msg = f"Error: Unable to initialize exporter for {output_path}"
+                try:
+                    if hasattr(exporter, 'GetStatus') and hasattr(exporter.GetStatus(), 'GetErrorString'):
+                        error_msg += f"\n{exporter.GetStatus().GetErrorString()}"
+                except:
+                    pass  # Skip if not available
+                self.debug_print(error_msg)
+                exporter.Destroy()
+                sdk_manager.Destroy()
+                return False
+            
+            # Export the scene
+            exporter.Export(scene)
+            exporter.Destroy()
+            
+            self.debug_print(f"Exported converted file to {output_path}")
+            
+            # Destroy the SDK manager and all objects it created
+            sdk_manager.Destroy()
+            
+            return True
+        
+        except Exception as e:
+            error_msg = f"Error converting axis system: {str(e)}"
+            self.debug_print(error_msg)
+            self.debug_print(traceback.format_exc())
+            return False
+
+    def post_process_exported_files(self):
+        """Post-process exported files with FBX SDK Axis Conversion"""
+        if self.sdk_up_axis_combo.currentText() == "Y-up (None)" or not self.exported_files:
+            self.debug_print("FBX SDK Axis Conversion skipped - Not enabled or no files exported")
+            return [], None
+            
+        if not FBX_SDK_AVAILABLE:
+            self.debug_print("FBX SDK not available, skipping post-processing")
+            QMessageBox.warning(self, "Warning", "FBX SDK not available, skipping axis conversion.")
+            return [], None
+            
+        target_axis = self.sdk_up_axis_combo.currentText().replace(" (None)", "")
+        self.debug_print(f"Starting FBX SDK Axis Conversion for {len(self.exported_files)} files to {target_axis}")
+        
+        processed_files = []
+        conversion_errors = []
+        total_files = len(self.exported_files)
+        
+        # Update progress bar for conversion phase
+        self.progress_bar.setRange(0, total_files)
+        self.progress_bar.setValue(0)
+        
+        for idx, file_path in enumerate(self.exported_files, start=1):
+            self.debug_print(f"Processing file {idx}/{total_files}: {file_path}")
+            
+            try:
+                # Convert the file in-place (overwrite) using our integrated method
+                success = self.convert_fbx_axes(file_path, target_axis, output_path=None, fbx_version=None)
+                
+                if success:
+                    processed_files.append(file_path)
+                    self.debug_print(f"Successfully converted: {file_path}")
+                else:
+                    conversion_errors.append(file_path)
+                    self.debug_print(f"Failed to convert: {file_path}")
+            except Exception as e:
+                conversion_errors.append(file_path)
+                self.debug_print(f"Error converting {file_path}: {str(e)}")
+                
+            # Update progress bar
+            self.progress_bar.setValue(idx)
+            QApplication.processEvents()
+        
+        # Prepare a simple message about the conversion
+        if processed_files:
+            # Simplified message - just stating what axis was converted to
+            message = f"Converted to {target_axis}"
+            self.debug_print(f"Successfully converted {len(processed_files)} FBX files to {target_axis}")
+        else:
+            message = None
+            self.debug_print(f"No files were successfully converted to {target_axis}")
+            
+        # Return the file list and summary message for the export log without showing any popup
+        return processed_files, message
+        
+    def plot_all_skeleton_joints(self):
+        """Plot all skeleton joints for the current take"""
+        if not self.selected_nodes:
+            self.debug_print("No skeleton nodes to plot")
+            return False
+            
+        try:
+            self.debug_print("Starting bake animation for all skeleton joints...")
+            
+            # Get current take
+            current_take = FBSystem().CurrentTake
+            self.debug_print(f"Current take: {current_take.Name}")
+            
+            # Store the current selection
+            original_selection = FBModelList()
+            FBGetSelectedModels(original_selection)
+            
+            # Store current time to restore later
+            player_control = FBPlayerControl()
+            original_time = FBSystem().LocalTime
+            
+            # Select all skeleton nodes for plotting
+            FBBeginChangeAllModels()
+            
+            # Clear all selections first
+            for model in original_selection:
+                model.Selected = False
+                
+            # Select all skeleton nodes we want to plot
+            for model in self.selected_nodes:
+                model.Selected = True
+                
+            self.debug_print(f"Selected {len(self.selected_nodes)} skeleton nodes for plotting")
+            
+            # Set up plot options
+            plot_options = FBPlotOptions()
+            plot_options.ConstantKeyReducerKeepOneKey = True  # Keep at least one key per property
+            plot_options.PlotAllTakes = False                 # Only plot current take
+            plot_options.PlotOnFrame = True                   # Plot on each frame
+            plot_options.PlotPeriod = FBTime(0, 0, 0, 1)      # 1 frame interval
+            plot_options.PlotTranslationOnRootOnly = False    # Plot translation on all joints
+            plot_options.PreciseTimeDiscontinuities = True    # Ensure accurate plotting at discontinuities
+            plot_options.RotationFilterToApply = FBRotationFilter.kFBRotationFilterUnroll  # Use unroll filter
+            plot_options.UseConstantKeyReducer = True         # Use key reducer
+            
+            # Go to the start frame to begin plotting
+            take_span = current_take.LocalTimeSpan
+            start_frame = take_span.GetStart().GetFrame()
+            player_control.Goto(FBTime(0, 0, 0, start_frame))
+            FBSystem().Scene.Evaluate()
+            
+            # Plot the animation for all selected models
+            self.debug_print("Plotting all skeleton joints...")
+            try:
+                current_take.PlotTakeOnSelected(plot_options)
+                self.debug_print("Joint plotting completed successfully")
+            except Exception as e:
+                self.debug_print(f"Error during joint plotting: {e}")
+                
+            # Restore original selection
+            for model in self.selected_nodes:
+                model.Selected = False
+                
+            for model in original_selection:
+                model.Selected = True
+                
+            FBEndChangeAllModels()
+            
+            # Restore the original time
+            player_control.Goto(original_time)
+            FBSystem().Scene.Evaluate()
+            
+            return True
+            
+        except Exception as e:
+            self.debug_print(f"Error plotting all skeleton joints: {e}")
+            return False
+    
+    def clear_animation_on_all_joints(self):
+        """Clean up animation by removing all keys from skeleton joints"""
+        try:
+            # Count statistics
+            cleared_nodes = 0
+            cleared_curves = 0
+            
+            # Process each joint in the selected nodes
+            for joint in self.selected_nodes:
+                # Skip non-skeleton nodes
+                if not hasattr(joint, 'ClassName') or joint.ClassName() != "FBModelSkeleton":
+                    continue
+                
+                # Process all properties in the joint
+                for prop in joint.PropertyList:
+                    if prop.IsAnimatable() and prop.IsAnimated():
+                        try:
+                            # Get animation node for this property
+                            anim_node = prop.GetAnimationNode()
+                            if not anim_node:
+                                continue
+                                
+                            # Check for direct FCurve on node
+                            if hasattr(anim_node, 'FCurve') and anim_node.FCurve:
+                                try:
+                                    # Correctly check for keys using len(fcurve.Keys)
+                                    keys_count = len(anim_node.FCurve.Keys) if hasattr(anim_node.FCurve, 'Keys') else 0
+                                    if keys_count > 0:
+                                        anim_node.FCurve.EditClear()
+                                        cleared_curves += 1
+                                        cleared_nodes += 1
+                                except Exception:
+                                    pass
+                            
+                            # Check for child nodes (for vector properties like Translation, Rotation)
+                            if hasattr(anim_node, 'Nodes') and anim_node.Nodes:
+                                for sub_node in anim_node.Nodes:
+                                    if hasattr(sub_node, 'FCurve') and sub_node.FCurve:
+                                        try:
+                                            # Correctly check for keys using len(fcurve.Keys)
+                                            keys_count = len(sub_node.FCurve.Keys) if hasattr(sub_node.FCurve, 'Keys') else 0
+                                            if keys_count > 0:
+                                                sub_node.FCurve.EditClear()
+                                                cleared_curves += 1
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+            
+            # Set a key on the current frame for all joints to preserve positions
+            self.set_keys_on_joints()
+            
+            return True
+        except Exception:
+            return False
+            
+    def set_keys_on_joints(self):
+        """Set keys on all joints to preserve their positions"""
+        # Get current time
+        current_time = FBSystem().LocalTime
+        
+        try:
+            # Process each joint in the selected nodes
+            for joint in self.selected_nodes:
+                # Skip non-skeleton nodes
+                if not hasattr(joint, 'ClassName') or joint.ClassName() != "FBModelSkeleton":
+                    continue
+                
+                # Handle standard transform properties
+                for prop_name in ['Translation', 'Rotation']:
+                    if hasattr(joint, prop_name):
+                        try:
+                            prop = getattr(joint, prop_name)
+                            
+                            # Make sure it's animatable
+                            if prop.IsAnimatable():
+                                # Set property as animated
+                                prop.SetAnimated(True)
+                                
+                                # Get animation node
+                                anim_node = prop.GetAnimationNode()
+                                if anim_node and hasattr(anim_node, 'Nodes'):
+                                    # Get current values
+                                    values = []
+                                    for i in range(3):  # X, Y, Z
+                                        values.append(prop[i])
+                                        
+                                    # Add keys for each component
+                                    for i, component in enumerate(['X', 'Y', 'Z']):
+                                        try:
+                                            if i < len(anim_node.Nodes):
+                                                component_node = anim_node.Nodes[i]
+                                                if hasattr(component_node, 'FCurve') and component_node.FCurve:
+                                                    # Add a key at current time with current value
+                                                    component_node.FCurve.KeyAdd(current_time, values[i])
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+            
     def export_selected_takes(self, global_folder, export_items, prefix, bake_animation=True):
         """Export the selected takes to FBX files"""
         scene = FBSystem().Scene
         if not scene:
             return
         
+        # Clear the list of exported files for this session
+        self.exported_files = []
+        
         original_take = FBSystem().CurrentTake
         takes_export_info = {}
         total = len(export_items)
         
-        # Check if axis conversion is enabled using the UI checkboxes directly
-        axis_conversion_enabled = self.axis_conversion_cb.isChecked()
-        target_axis = self.up_axis_combo.currentText()
+        # Check if axis conversion is enabled based on dropdown selection
+        axis_conversion_enabled = self.up_axis_combo.currentText() != "Y-up (None)"
+        target_axis = self.up_axis_combo.currentText().replace(" (None)", "")
         
         # Store original root state if axis conversion is enabled
         original_root_state = None
@@ -1647,21 +2440,31 @@ class MotionBuilderExporter(QMainWindow):
             if not os.path.isdir(export_folder):
                 try:
                     os.makedirs(export_folder)
-                    # print(f"Created folder: {export_folder}")
+                    self.debug_print(f"Created folder: {export_folder}")
                 except Exception as e:
-                    # print(f"Error creating folder {export_folder}: {e}")
+                    self.debug_print(f"Error creating folder {export_folder}: {e}")
                     QMessageBox.warning(self, "Export Error", f"Failed to create folder: {export_folder}")
                     continue
             
             try:
                 # Set current take
-                # print(f"Setting current take to: {take.Name}")
+                self.debug_print(f"Setting current take to: {take.Name}")
                 FBSystem().CurrentTake = take
                 
-                # Always prepare root for export (handles constraints)
+                # Step 1: Bake animation FIRST if option is enabled
+                baked_animation = False
+                if self.bake_anim_cb.isChecked() and self.selected_nodes:
+                    self.debug_print("Baking Animation (plotting all skeleton joints)...")
+                    baked_animation = self.plot_all_skeleton_joints()
+                    if baked_animation:
+                        self.debug_print("Animation baking completed successfully")
+                    else:
+                        self.debug_print("WARNING: Animation baking failed or was incomplete")
+                        
+                # Step 2: Prepare root for export (handles constraints and/or axis conversion)
                 export_prep_data = None
                 if self.skeleton_root:
-                    # print(f"\n>>> Preparing take '{take.Name}' for export...")
+                    self.debug_print(f"Preparing take '{take.Name}' for export...")
                     # Apply axis conversion only if enabled
                     if axis_conversion_enabled:
                         export_prep_data = self.prepare_root_for_export(target_axis)
@@ -1670,24 +2473,31 @@ class MotionBuilderExporter(QMainWindow):
                     
                     if not export_prep_data:
                         export_prep_data = None
-                        # print(">>> WARNING: Failed to prepare root for export")
+                        self.debug_print("WARNING: Failed to prepare root for export")
                 
-                # Standard export
+                # Step 3: Export the file
                 file_name = (prefix if prefix else "") + take.Name + ".fbx"
                 export_path = os.path.join(export_folder, file_name)
-                # print(f"Exporting take: {take.Name} to {export_path}")
+                self.debug_print(f"Exporting take: {take.Name} to {export_path}")
                 FBApplication().FileExport(export_path)
-                # print(f"Exported take: {take.Name} to {export_path}")
+                self.debug_print(f"Exported take: {take.Name} to {export_path}")
                 exported = True
                 
-                # Handle post-export cleanup
+                # Add successfully exported file to the list for post-processing
+                if exported and os.path.exists(export_path):
+                    self.exported_files.append(export_path)
+                
+                # Step 4: Cleanup after export
+                # 4.1 First cleanup any special root handling
                 if export_prep_data:
-                    # print("\n>>> Starting post-export cleanup...")
                     self.cleanup_after_export(export_prep_data)
-                    # print(">>> Post-export cleanup complete")
+                
+                # 4.2 Clean up baked animation to reduce scene size
+                if baked_animation:
+                    self.clear_animation_on_all_joints()
                 
             except Exception as e:
-                # print(f"Error exporting take: {take.Name} - {e}")
+                self.debug_print(f"Error exporting take: {take.Name} - {e}")
                 exported = False
                 
                 # Make sure to restore state even on error
@@ -1701,8 +2511,10 @@ class MotionBuilderExporter(QMainWindow):
             self.progress_bar.setValue(idx)
             QApplication.processEvents()
         
+        # Restore original take
         FBSystem().CurrentTake = original_take
         
+        # Update takes export info
         current_take_names = {take.Name for take in scene.Takes}
         takes_export_info = {k: v for k, v in takes_export_info.items() if k in current_take_names}
         
@@ -1710,12 +2522,18 @@ class MotionBuilderExporter(QMainWindow):
             if take.Name not in takes_export_info:
                 takes_export_info[take.Name] = {"export_path": "", "exported": False}
         
+        # Save settings with updated export info
         scene_settings = self.load_settings()
         scene_settings["global"] = global_folder
         scene_settings["takes"] = takes_export_info
         self.save_settings(scene_settings)
+        
+        # Run post-processing on all exported files if SDK axis conversion is enabled
+        if self.sdk_up_axis_combo.currentText() != "Y-up (None)" and self.exported_files:
+            self.debug_print(f"Running post-processing on {len(self.exported_files)} exported files")
+            processed_files, sdk_axis_conversion_summary = self.post_process_exported_files()
     
-    def open_export_log(self, updated_settings):
+    def open_export_log(self, updated_settings, conversion_summary=None):
         """Open a window showing the export log"""
         log_dialog = QDialog(self)
         log_dialog.setWindowTitle("Export Log")
@@ -1730,6 +2548,19 @@ class MotionBuilderExporter(QMainWindow):
         
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
+        
+        # Add FBX SDK Axis Conversion summary if available - simplified version
+        if conversion_summary:
+            conversion_frame = QFrame()
+            conversion_frame.setFrameShape(QFrame.StyledPanel)
+            conversion_layout = QVBoxLayout(conversion_frame)
+            
+            # Simplified message with clear formatting
+            conversion_label = QLabel("FBX SDK Axis Conversion: " + conversion_summary)
+            conversion_label.setStyleSheet("font-weight: bold;")
+            conversion_layout.addWidget(conversion_label)
+            
+            content_layout.addWidget(conversion_frame)
         
         selections = updated_settings.get("selections", {})
         takes = updated_settings.get("takes", {})
