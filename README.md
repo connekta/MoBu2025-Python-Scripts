@@ -30,7 +30,7 @@ It looks for icons with the same name as the script in the folder "C:\Program Fi
 Oneclick set up HIK rig + characterize it, based on HIK templates of joint to rig names found in: C:\Users\[USER]\AppData\Roaming\Autodesk\HIKCharacterizationTool6\template\HIK.xml - Either change the values here or add your own template and link it.
 - **Controlify.py**
 
-![image](https://github.com/user-attachments/assets/8104be3f-cccc-4c80-ac4e-1332e5ef2e76)
+![image](https://github.com/user-attachments/assets/d10959a9-431f-4e9f-aff5-fe79695b62bc)
 
 
 Quick setup for Controls outside of HIK. Support for Parent, Aim, Position and Rotation Constraints. It will create a Marker with the set shape and size for each selected object - and then set up the correct null-hierarchy and constraints. Option to add offset either at creation or if selecting already created marker and then pressing Manual Offset button.
@@ -39,7 +39,7 @@ Quick setup for Controls outside of HIK. Support for Parent, Aim, Position and R
 Made in order to Merge all the animations in a folder onto the rig - WITH the take name being what the FBX is named.
 - **FBXexporter.py**
 
-![image](https://github.com/user-attachments/assets/2f7c3fc2-14af-434b-91d5-b41b6530d6f1)
+![image](https://github.com/user-attachments/assets/4e0e3073-52f2-4b4b-9d95-738c488c4d5b)
 
 Better handling for exporting the skeleton for takes selected through the UI. Supports adding export prefix, different export paths per take group, Axis conversion between Y and Z up. Only exports the joints in the character skeleton. Remembers export paths and exported takes between sessions.
 - **RigImporter.py**
