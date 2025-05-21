@@ -101,4 +101,6 @@ Feel free to submit issues and enhancement requests!
 
 ## License
 
-I dont know? I'm not really sharing this 
+This project is licensed under the MIT License with Attribution - see the [LICENSE.txt](LICENSE.txt) file for details.
+
+Copyright (c) 2025 Morris Belfrage
