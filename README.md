@@ -27,6 +27,13 @@ I've used ClaudeAI to assist me in creating these. It's just scripts I've needed
 Adding all scripts within the folder "PythonCustomScripts" to the top center of Motionbuilder, next to the help-dropdown menu. Also has options to show Name or icons, and it also has an extra window that can be opened with additional buttons from other folders or manually moved there by right-clicking. Also has a Time tracker per file open, with statistics per day and so on if clicked.
 
 It looks for icons with the same name as the script in the folder "C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\**PythonScriptIcons**"
+- **FBXexporter.py**
+
+![image](https://github.com/user-attachments/assets/b7528df0-9e71-4822-9458-9fc7236b423c)
+
+Better handling for exporting the skeleton for takes selected through the UI. Supports adding export prefix, different export paths per take group, Axis conversion between Y and Z up. Only exports the joints in the character skeleton. Remembers export paths and exported takes between sessions.
+
+**NOTE:** In order to use the FBX Python SDK (for Axis Conversion) you'll need to grab the "fbx.cp311-win_amd64.pyd" from the FBX_Exporter_Utils folder and save it in C:\Program Files\Autodesk\MotionBuilder 2025\bin\x64\python\Lib\site-packages. (I would've linked to just installing the SDK from autodesk, but they only have it up to 3.10, so I had to build the 3.11 lib myself). I haven't tested this on any other computers so I'm not actually sure if this is the only file I need to share in order for it to work.
 
 - **Characterize.py**
 
@@ -40,13 +47,6 @@ Quick setup for Controls outside of HIK. Support for Parent, Aim, Position and R
 - **FBXbatchImporter.py**
 
 Made in order to Merge all the animations in a folder onto the rig - WITH the take name being what the FBX is named.
-- **FBXexporter.py**
-
-![image](https://github.com/user-attachments/assets/4e0e3073-52f2-4b4b-9d95-738c488c4d5b)
-
-Better handling for exporting the skeleton for takes selected through the UI. Supports adding export prefix, different export paths per take group, Axis conversion between Y and Z up. Only exports the joints in the character skeleton. Remembers export paths and exported takes between sessions.
-
-**NOTE:** In order to use the FBX Python SDK (for Axis Conversion) you'll need to grab the "fbx.cp311-win_amd64.pyd" from the FBX_Exporter_Utils folder and save it in C:\Program Files\Autodesk\MotionBuilder 2025\bin\x64\python\Lib\site-packages. (I would've linked to just installing the SDK from autodesk, but they only have it up to 3.10, so I had to build the 3.11 lib myself). I haven't tested this on any other computers so I'm not actually sure if this is the only file I need to share in order for it to work.
 
 - **RigImporter.py**
 
