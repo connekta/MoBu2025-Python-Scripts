@@ -1,6 +1,7 @@
 # MotionBuilder 2025 Python Scripts
 
 This repository contains my custom Python scripts for Autodesk MotionBuilder 2025.
+I've used ClaudeAI to assist me in creating these, so I'm not really the author of this. It's just scripts I've needed for my own workflows.
 
 ## Scripts Overview
 
@@ -101,4 +102,4 @@ Feel free to submit issues and enhancement requests!
 
 ## License
 
-I dont know? I'm not really sharing this 
+I dont know? I'm not really sharing this - but I also didn't really "make" it either so.. 🤷‍♂️
