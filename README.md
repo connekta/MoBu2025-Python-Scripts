@@ -71,8 +71,6 @@ A more focused File opener where you can add manual Directories for it to show a
 
 ## Known Bugs
 
-- TakeHandler's duplicate doesn't properly duplicate the take but instead just creates a new take with that set name.
-
 ## Requirements
 
 - Autodesk MotionBuilder 2025
