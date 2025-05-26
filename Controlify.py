@@ -24,7 +24,7 @@ try:
         QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
         QRadioButton, QPushButton, QMessageBox, QLabel, QSpinBox,
         QComboBox, QColorDialog, QDoubleSpinBox, QGridLayout, QCheckBox,
-        QSizePolicy, QTextEdit, QWidget
+        QSizePolicy, QTextEdit, QWidget, QLineEdit
     )
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QColor
@@ -136,6 +136,9 @@ class ControlifyDialog(QDialog):
         
         # Add constraint type selection
         self.create_constraint_group(main_layout)
+        
+        # Add Character Extension controls
+        self.create_character_extension_group(main_layout)
         
         # Add marker appearance controls
         self.create_marker_appearance_group(main_layout)
@@ -448,6 +451,86 @@ class ControlifyDialog(QDialog):
         self.selection_timer.timeout.connect(self.check_selection)
         self.selection_timer.start(200)  # Check every 200ms
     
+    def create_character_extension_group(self, parent_layout):
+        """Create the Character Extension settings group"""
+        # Create collapsible group (collapsed by default)
+        group_box = QGroupBox("► Character Extension")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_character_extension_clicked()
+        
+        self.character_extension_group = group_box  # Store reference
+        self.character_extension_expanded = False
+        
+        # Main group layout with minimal spacing
+        main_group_layout = QVBoxLayout()
+        main_group_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
+        main_group_layout.setSpacing(2)  # Minimal spacing between items
+        
+        # Checkbox to enable/disable Character Extension functionality
+        self.char_ext_checkbox = QCheckBox("Add to Character Extension")
+        self.char_ext_checkbox.setChecked(False)
+        self.char_ext_checkbox.toggled.connect(self.on_char_ext_toggled)
+        main_group_layout.addWidget(self.char_ext_checkbox)
+        
+        # Container for dropdown and name input (hidden by default)
+        self.char_ext_controls_container = QWidget()
+        controls_layout = QGridLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)  # No margins
+        controls_layout.setSpacing(2)  # Minimal spacing
+        
+        # Character Extension dropdown
+        self.ext_label = QLabel("Extension:")
+        self.ext_label.setFixedWidth(80)  # Fixed width for label
+        controls_layout.addWidget(self.ext_label, 0, 0)
+        
+        self.char_ext_combo = QComboBox()
+        self.char_ext_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Allow expansion
+        self.populate_character_extensions()
+        controls_layout.addWidget(self.char_ext_combo, 0, 1)
+        self.char_ext_combo.currentIndexChanged.connect(self.on_char_ext_selection_changed)
+        
+        # Extension name input (for new extensions)
+        self.name_label = QLabel("Extension Name:")
+        self.name_label.setFixedWidth(80)  # Same fixed width as extension label
+        controls_layout.addWidget(self.name_label, 1, 0)
+        
+        self.char_ext_name_input = QLineEdit()
+        self.char_ext_name_input.setPlaceholderText("Enter new extension name...")
+        # Set placeholder text color to white
+        self.char_ext_name_input.setStyleSheet("QLineEdit { color: white; } QLineEdit::placeholder { color: white; }")
+        self.char_ext_name_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Allow expansion
+        controls_layout.addWidget(self.char_ext_name_input, 1, 1)
+        
+        # Set column stretch factors to maintain consistent sizing
+        controls_layout.setColumnStretch(0, 0)  # Labels don't stretch
+        controls_layout.setColumnStretch(1, 1)  # Input controls stretch
+        
+        # Initially hide name input row
+        self.name_label.setVisible(False)
+        self.char_ext_name_input.setVisible(False)
+        
+        self.char_ext_controls_container.setLayout(controls_layout)
+        main_group_layout.addWidget(self.char_ext_controls_container)
+        
+        # Hide controls by default
+        self.char_ext_controls_container.setVisible(False)
+        
+        # Create main container
+        self.character_extension_container = QWidget()
+        self.character_extension_container.setLayout(main_group_layout)
+        
+        # Overall group layout
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.addWidget(self.character_extension_container)
+        group_box.setLayout(group_layout)
+        
+        # Set initial collapsed state
+        self.character_extension_container.setVisible(False)
+        group_box.setFixedHeight(30)
+        
+        parent_layout.addWidget(group_box)
+    
     def create_marker_appearance_group(self, parent_layout):
         """Create the marker appearance settings group"""
         # Create collapsible group (collapsed by default)
@@ -651,11 +734,20 @@ class ControlifyDialog(QDialog):
             # Store group states
             self.marker_appearance_was_expanded = self.marker_appearance_expanded
             self.controller_offset_was_expanded = self.controller_offset_expanded
+            self.character_extension_was_expanded = self.character_extension_expanded
+            
+            # Store Character Extension checkbox state
+            self.char_ext_was_enabled = self.char_ext_checkbox.isChecked()
             
             # Disable preview and gray it out
             if self.preview_enabled:
                 self.preview_checkbox.setChecked(False)
             self.preview_checkbox.setEnabled(False)
+            
+            # Disable Character Extension checkbox and hide group completely
+            self.char_ext_checkbox.setChecked(False)
+            self.char_ext_checkbox.setEnabled(False)
+            self.character_extension_group.setVisible(False)
             
             # Hide marker appearance and controller offset groups completely
             self.marker_appearance_group.setVisible(False)
@@ -677,11 +769,24 @@ class ControlifyDialog(QDialog):
             if hasattr(self, 'preview_was_enabled') and self.preview_was_enabled:
                 self.preview_checkbox.setChecked(True)
             
+            # Re-enable Character Extension checkbox and show group
+            self.char_ext_checkbox.setEnabled(True)
+            self.character_extension_group.setVisible(True)
+            # Restore Character Extension checkbox state
+            if hasattr(self, 'char_ext_was_enabled') and self.char_ext_was_enabled:
+                self.char_ext_checkbox.setChecked(True)
+            
             # Show marker appearance and controller offset groups with restored state
             self.marker_appearance_group.setVisible(True)
             self.controller_offset_group.setVisible(True)
             
             # Restore expanded states
+            if hasattr(self, 'character_extension_was_expanded'):
+                self.character_extension_expanded = self.character_extension_was_expanded
+                self.character_extension_container.setVisible(self.character_extension_expanded)
+                if not self.character_extension_expanded:
+                    self.character_extension_group.setFixedHeight(30)
+                    
             if hasattr(self, 'marker_appearance_was_expanded'):
                 self.marker_appearance_expanded = self.marker_appearance_was_expanded
                 self.marker_appearance_container.setVisible(self.marker_appearance_expanded)
@@ -762,6 +867,75 @@ class ControlifyDialog(QDialog):
         
         # Adjust window size
         QTimer.singleShot(10, self.adjustSize)
+    
+    def on_character_extension_clicked(self):
+        """Toggle character extension group visibility"""
+        if self.character_extension_expanded:
+            # Collapse
+            self.character_extension_container.setVisible(False)
+            self.character_extension_group.setFixedHeight(30)
+            self.character_extension_group.setTitle("► Character Extension")
+            self.character_extension_expanded = False
+        else:
+            # Expand
+            self.character_extension_container.setVisible(True)
+            # Calculate height based on current content
+            self.update_character_extension_height()
+            self.character_extension_group.setTitle("▼ Character Extension")
+            self.character_extension_expanded = True
+        
+        # Adjust window size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def on_char_ext_toggled(self, checked):
+        """Toggle Character Extension controls based on checkbox"""
+        self.char_ext_controls_container.setVisible(checked)
+        if checked:
+            # Refresh the dropdown when enabled
+            self.populate_character_extensions()
+            # Show/hide name input based on current selection
+            self.on_char_ext_selection_changed()
+        
+        # Update height when expanded
+        if self.character_extension_expanded:
+            self.update_character_extension_height()
+        
+        # Adjust window size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def on_char_ext_selection_changed(self):
+        """Handle Character Extension dropdown selection changes"""
+        if not self.char_ext_checkbox.isChecked():
+            return
+            
+        current_text = self.char_ext_combo.currentText()
+        is_create_new = current_text == "Create New Extension"
+        
+        # Show/hide name input row
+        self.name_label.setVisible(is_create_new)
+        self.char_ext_name_input.setVisible(is_create_new)
+        
+        if is_create_new:
+            self.char_ext_name_input.setFocus()
+        
+        # Update height when expanded
+        if self.character_extension_expanded:
+            self.update_character_extension_height()
+        
+        # Adjust window size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def update_character_extension_height(self):
+        """Update the Character Extension group height based on content"""
+        base_height = 50  # Base height for checkbox
+        
+        if self.char_ext_checkbox.isChecked():
+            base_height += 25  # Add height for extension dropdown
+            
+            if self.name_label.isVisible():
+                base_height += 25  # Add height for name input
+        
+        self.character_extension_group.setFixedHeight(base_height)
     
     def on_marker_size_changed(self, value):
         """Handle marker size changes, especially during manual offset mode"""
@@ -1296,12 +1470,56 @@ class ControlifyDialog(QDialog):
             for marker in created_markers:
                 marker.Selected = True
             
-            # Update status
-            self.status_label.setText(f"Created {created_count} control rig(s)")
+            # Add markers to Character Extension if enabled
+            if self.char_ext_checkbox.isChecked() and created_markers:
+                success = self.add_markers_to_character_extension(created_markers)
+                if success:
+                    # Update status to include Character Extension info
+                    current_selection = self.char_ext_combo.currentText()
+                    if current_selection == "Create New Extension":
+                        extension_name = self.char_ext_name_input.text().strip()
+                        if self.lr_color_checkbox.isChecked():
+                            self.status_label.setText(f"Created {created_count} control rig(s) and added to new Character Extensions '{extension_name}_left' and '{extension_name}_right'")
+                        else:
+                            self.status_label.setText(f"Created {created_count} control rig(s) and added to new Character Extension '{extension_name}'")
+                    else:
+                        self.status_label.setText(f"Created {created_count} control rig(s) and added to Character Extension '{current_selection}'")
+                    
+                    # Refresh the dropdown for next time
+                    current_selection = self.char_ext_combo.currentText()
+                    
+                    # If we created a new extension, switch to that extension instead of "Create New Extension"
+                    if current_selection == "Create New Extension":
+                        extension_name = self.char_ext_name_input.text().strip()
+                        if self.lr_color_checkbox.isChecked():
+                            # For left/right extensions, keep "Create New Extension" selected with name preserved
+                            target_selection = "Create New Extension"
+                        else:
+                            # For single extensions, switch to the newly created extension
+                            target_selection = extension_name
+                    else:
+                        # For existing extensions, remember the current selection
+                        target_selection = current_selection
+                    
+                    self.populate_character_extensions()
+                    
+                    # Set the dropdown to the target selection
+                    index = self.char_ext_combo.findText(target_selection)
+                    if index >= 0:
+                        self.char_ext_combo.setCurrentIndex(index)
+                else:
+                    self.status_label.setText(f"Created {created_count} control rig(s) but failed to add to Character Extension")
+            else:
+                # Update status
+                self.status_label.setText(f"Created {created_count} control rig(s)")
             
             # Reset offset values for next creation
             self.reset_translation()
             self.reset_rotation()
+            
+            # MOTIONBUILDER QUIRK FIX: Force hierarchy evaluation by selecting/deselecting skeleton root
+            # This prevents glitching issues with end joints
+            self.force_skeleton_evaluation(selected_models)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
@@ -1467,6 +1685,11 @@ class ControlifyDialog(QDialog):
         # Add to custom folder
         if constraint and self.custom_folder:
             self.add_constraint_to_folder(constraint)
+        
+        # Parent the parent control to the master null for organization
+        master_null = self.get_or_create_master_null()
+        if master_null:
+            parent_control.Parent = master_null
         
         return parent_control
     
@@ -2395,6 +2618,202 @@ class ControlifyDialog(QDialog):
         
         self.status_label.setText(f"Deleted {deleted_count} control rig{'s' if deleted_count > 1 else ''}")
     
+    def populate_character_extensions(self):
+        """Populate the Character Extension dropdown with existing extensions"""
+        if not MOBU_AVAILABLE:
+            return
+            
+        self.char_ext_combo.clear()
+        self.char_ext_combo.addItem("Create New Extension")
+        
+        # Find existing Character Extensions in the scene
+        try:
+            for component in FBSystem().Scene.Components:
+                if component.ClassName() == "FBCharacterExtension":
+                    self.char_ext_combo.addItem(component.Name)
+        except Exception as e:
+            pass  # Silently handle any errors
+    
+    def get_or_create_master_null(self):
+        """Get or create the master null that will parent all _CTRL_parent nulls"""
+        if not MOBU_AVAILABLE:
+            return None
+            
+        master_null_name = "Controlify_CTRLs_parent"
+        
+        # Check if master null already exists
+        for component in FBSystem().Scene.Components:
+            if component.Name == master_null_name and component.ClassName() == "FBModelNull":
+                return component
+        
+        # Create new master null
+        master_null = FBModelNull(master_null_name)
+        master_null.Show = True
+        master_null.Size = 15
+        
+        # Set null properties
+        null_prop = master_null.PropertyList.Find('Look')
+        if null_prop:
+            null_prop.Data = 10  # 10 = None (invisible)
+            
+        # Make it invisible but keep it selectable
+        master_null.Visibility = False
+        
+        return master_null
+    
+    def add_markers_to_character_extension(self, markers):
+        """Add the created markers to the selected Character Extension"""
+        if not MOBU_AVAILABLE or not self.char_ext_checkbox.isChecked():
+            return False
+            
+        try:
+            current_selection = self.char_ext_combo.currentText()
+            
+            if current_selection == "Create New Extension":
+                # Create new Character Extension
+                extension_name = self.char_ext_name_input.text().strip()
+                if not extension_name:
+                    QMessageBox.warning(self, "Warning", "No Character Extension name set. Markers were not added to an extension.")
+                    return False
+                
+                # Check if Right/Left colors are enabled
+                if self.lr_color_checkbox.isChecked():
+                    # Get or create separate left and right extensions
+                    left_name = f"{extension_name}_left"
+                    right_name = f"{extension_name}_right"
+                    
+                    # Check if left extension already exists
+                    left_extension = None
+                    for component in FBSystem().Scene.Components:
+                        if component.ClassName() == "FBCharacterExtension" and component.Name == left_name:
+                            left_extension = component
+                            break
+                    
+                    # Create left extension if it doesn't exist
+                    if not left_extension:
+                        left_extension = FBCharacterExtension(left_name)
+                        left_extension.Show = True
+                        self.add_extension_to_character_if_single(left_extension)
+                    
+                    # Check if right extension already exists
+                    right_extension = None
+                    for component in FBSystem().Scene.Components:
+                        if component.ClassName() == "FBCharacterExtension" and component.Name == right_name:
+                            right_extension = component
+                            break
+                    
+                    # Create right extension if it doesn't exist
+                    if not right_extension:
+                        right_extension = FBCharacterExtension(right_name)
+                        right_extension.Show = True
+                        self.add_extension_to_character_if_single(right_extension)
+                    
+                    # Sort markers into left and right based on naming patterns
+                    for marker in markers:
+                        if marker and marker.ClassName() == "FBModelMarker":
+                            marker_name = marker.Name.lower()
+                            
+                            # Check for right side patterns
+                            if any(pattern in marker_name for pattern in ["_r_", "_right_", "_rgt_", "_r.", "_right.", "_rgt.", 
+                                                                        "_r", "_right", "_rgt"]):
+                                right_extension.ConnectSrc(marker)
+                            # Check for left side patterns
+                            elif any(pattern in marker_name for pattern in ["_l_", "_left_", "_lft_", "_l.", "_left.", "_lft.",
+                                                                          "_l", "_left", "_lft"]):
+                                left_extension.ConnectSrc(marker)
+                            else:
+                                # Default to left extension if no pattern found
+                                left_extension.ConnectSrc(marker)
+                else:
+                    # Get or create single Character Extension
+                    char_extension = None
+                    for component in FBSystem().Scene.Components:
+                        if component.ClassName() == "FBCharacterExtension" and component.Name == extension_name:
+                            char_extension = component
+                            break
+                    
+                    # Create extension if it doesn't exist
+                    if not char_extension:
+                        char_extension = FBCharacterExtension(extension_name)
+                        char_extension.Show = True
+                        self.add_extension_to_character_if_single(char_extension)
+                    
+                    # Add all markers to the single extension
+                    for marker in markers:
+                        if marker and marker.ClassName() == "FBModelMarker":
+                            char_extension.ConnectSrc(marker)
+                
+            else:
+                # Find existing Character Extension
+                char_extension = None
+                for component in FBSystem().Scene.Components:
+                    if component.ClassName() == "FBCharacterExtension" and component.Name == current_selection:
+                        char_extension = component
+                        break
+                
+                if not char_extension:
+                    QMessageBox.warning(self, "Error", f"Character Extension '{current_selection}' not found.")
+                    return False
+                
+                # Add markers to the existing extension
+                for marker in markers:
+                    if marker and marker.ClassName() == "FBModelMarker":
+                        char_extension.ConnectSrc(marker)
+            
+            return True
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add markers to Character Extension: {str(e)}")
+            return False
+    
+    def add_extension_to_character_if_single(self, extension):
+        """Add the extension to a character if only one character exists in the scene"""
+        if not MOBU_AVAILABLE:
+            return
+            
+        try:
+            # Find all characters in the scene
+            characters = []
+            for component in FBSystem().Scene.Components:
+                if component.ClassName() == "FBCharacter":
+                    characters.append(component)
+            
+            # Only add to character if exactly one character exists
+            if len(characters) == 1:
+                character = characters[0]
+                # Add the extension to the character's extension list
+                character.CharacterExtensions.append(extension)
+        except Exception as e:
+            # Silently handle any errors - this is a nice-to-have feature
+            pass
+    
+    def force_skeleton_evaluation(self, models):
+        """Force MotionBuilder to properly evaluate skeleton hierarchy by selecting/deselecting root"""
+        if not MOBU_AVAILABLE or not models:
+            return
+            
+        try:
+            # Find the root(s) of the skeleton hierarchy
+            skeleton_roots = set()
+            
+            for model in models:
+                # Walk up the hierarchy to find the root
+                current = model
+                while current.Parent:
+                    current = current.Parent
+                skeleton_roots.add(current)
+            
+            # Force evaluation by selecting and immediately deselecting each root
+            for root in skeleton_roots:
+                root.Selected = True
+                # Force scene evaluation
+                FBSystem().Scene.Evaluate()
+                root.Selected = False
+                
+        except Exception as e:
+            # Silently handle any errors - this is just a workaround
+            pass
+    
     def showEvent(self, event):
         """Override show event to handle focus issues in MotionBuilder"""
         super().showEvent(event)
@@ -2458,6 +2877,24 @@ class ControlifyDialog(QDialog):
 - Left (_l_, _left_, etc.) = Red<br>
 - Right (_r_, _right_, etc.) = Blue<br>
 You can customize these colors with the picker buttons.</p>
+
+<h3>Character Extensions:</h3>
+<p>Organize markers into Character Extensions for animation workflows:<br>
+- Check "Add to Character Extension"<br>
+- Select existing extension or create new one<br>
+- With Right/Left colors enabled, creates separate _left and _right extensions</p>
+
+<h3>Temporary Constraint:</h3>
+<p>Creates a temporary null parent for selected object:<br>
+- Select null or joint and press "Temporary Constraint"<br>
+- Creates null as parent of selected object<br>
+- Use "Delete Temp Constraint" to remove</p>
+
+<h3>Constrain Object to Object:</h3>
+<p>Direct constraint creation without markers:<br>
+- Enable "Constrain object to object"<br>
+- Select two objects (first = source, second = target)<br>
+- Creates constraint directly between objects</p>
 
         """)
         
