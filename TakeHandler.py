@@ -1371,7 +1371,8 @@ class TakeHandlerWindow(QMainWindow):
                     
                     # Schedule deselection after update completes
                     QTimer.singleShot(100, deselect_after_update)
-                    self.update_take_list()
+                    # Use the fast update method to preserve scrollbar position
+                    self.update_current_take_only()
                     break
     
     def closeEvent(self, event):
