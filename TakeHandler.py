@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QListWidget, QListWidg
                                QDialog, QLabel, QLineEdit, QInputDialog,
                                QMessageBox, QStyledItemDelegate, QStyle, QSizePolicy,
                                QSizeGrip)
-from PySide6.QtGui import QColor, QBrush, QPainter, QPolygon, QCursor, QFont
+from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QPolygon, QCursor, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRect, QPoint
 
 def get_motionbuilder_main_window():
@@ -94,7 +94,7 @@ class TakeChangeMonitor(QObject):
         self.last_current_take = self.system.CurrentTake.Name if self.system.CurrentTake else None
         self.timer = QTimer()
         self.timer.timeout.connect(self.check_takes)
-        self.timer.start(250)  # Check every 250ms for even more responsive updates
+        self.timer.start(500)  # Check every 500ms to reduce monitor spam
     
     def check_takes(self):
         system = FBSystem()
@@ -102,6 +102,7 @@ class TakeChangeMonitor(QObject):
         # Quick check for current take change (most common case)
         current_current_take = system.CurrentTake.Name if system.CurrentTake else None
         if current_current_take != self.last_current_take:
+            # Current take changed
             self.last_current_take = current_current_take
             self.currentTakeChanged.emit()  # Emit specific signal for current take changes
             return
@@ -109,16 +110,18 @@ class TakeChangeMonitor(QObject):
         # Less frequent check for take count/names changes
         current_take_count = len(system.Scene.Takes)
         if current_take_count != self.last_take_count:
+            # Take count changed
             self.last_take_count = current_take_count
             current_take_names = [system.Scene.Takes[i].Name for i in range(len(system.Scene.Takes))]
-            self.last_take_names = current_take_names
+            self.last_take_names = current_take_names.copy()  # Always make a copy
             self.takeChanged.emit()
             return
             
-        # Full check for name changes (most expensive)
+        # Full check for name changes (most expensive) - only if count hasn't changed
         current_take_names = [system.Scene.Takes[i].Name for i in range(len(system.Scene.Takes))]
         if current_take_names != self.last_take_names:
-            self.last_take_names = current_take_names
+            # Take names changed - make sure we create a proper independent copy
+            self.last_take_names = [name for name in current_take_names]  # Create a new list with copied elements
             self.takeChanged.emit()
 
 class TagDialog(QDialog):
@@ -214,7 +217,11 @@ class DraggableListWidget(QListWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QListWidget.InternalMove)
         self.setDefaultDropAction(Qt.MoveAction)
+        self.setDropIndicatorShown(False)
         self.internal_drop = False
+        
+        # Custom drop indicator
+        self.drop_indicator_position = -1
         
         # For in-place editing
         self.editing_item = None
@@ -227,16 +234,122 @@ class DraggableListWidget(QListWidget):
         if not self.indexAt(event.position().toPoint()).isValid():
             self.clearSelection()
     
+    def dragMoveEvent(self, event):
+        """Override drag move to show custom single drop indicator"""
+        # Find the closest item for drop position
+        drop_y = event.position().toPoint().y()
+        closest_row = -1
+        closest_distance = float('inf')
+        
+        for i in range(self.count()):
+            item = self.item(i)
+            if item and not item.isHidden():
+                item_rect = self.visualItemRect(item)
+                item_center_y = item_rect.center().y()
+                distance = abs(drop_y - item_center_y)
+                
+                if distance < closest_distance:
+                    closest_distance = distance
+                    closest_row = i
+        
+        # Update drop indicator position
+        if closest_row != self.drop_indicator_position:
+            self.drop_indicator_position = closest_row
+            self.viewport().update()
+            
+        super(DraggableListWidget, self).dragMoveEvent(event)
+    
+    def dragLeaveEvent(self, event):
+        """Clear drop indicator when drag leaves widget"""
+        self.drop_indicator_position = -1
+        self.viewport().update()
+        super(DraggableListWidget, self).dragLeaveEvent(event)
+    
+    def paintEvent(self, event):
+        """Paint the list and custom drop indicator"""
+        super(DraggableListWidget, self).paintEvent(event)
+        
+        # Draw custom drop indicator if dragging
+        if self.drop_indicator_position >= 0:
+            painter = QPainter(self.viewport())
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Set pen for drop indicator line
+            pen = QPen(QColor(100, 150, 255), 2)  # Blue line, 2px thick
+            painter.setPen(pen)
+            
+            # Get the item rectangle for the drop position
+            item = self.item(self.drop_indicator_position)
+            if item:
+                item_rect = self.visualItemRect(item)
+                # Draw line below the target item (indicating insert position)
+                y_pos = item_rect.bottom()
+                painter.drawLine(item_rect.left(), y_pos, item_rect.right(), y_pos)
+                
+            painter.end()
+    
     def dropEvent(self, event):
-        source_row = self.currentRow()
-        self.internal_drop = True
-        super(DraggableListWidget, self).dropEvent(event)
-        target_row = self.currentRow()
+        # Get all selected items for multi-take movement
+        selected_items = self.selectedItems()
         
-        if self.window and hasattr(self.window, "reorder_takes"):
-            self.window.reorder_takes(source_row, target_row)
+        # Use the drop indicator position directly
+        target_row = self.drop_indicator_position
+        target_item = self.item(target_row) if target_row >= 0 else None
+        target_take_name = target_item.take_name if target_item else None
         
-        self.internal_drop = False
+        # Clear drop indicator immediately
+        self.drop_indicator_position = -1
+        self.viewport().update()
+        
+        # Don't call Qt's dropEvent to avoid conflicts - handle everything ourselves
+        event.accept()
+        
+        # Perform the move using our backend logic
+        if self.window and selected_items and target_take_name:
+            # Temporarily stop monitors
+            monitor_was_running = False
+            if hasattr(self.window, 'monitor') and hasattr(self.window.monitor, 'timer'):
+                monitor_was_running = self.window.monitor.timer.isActive()
+                if monitor_was_running:
+                    self.window.monitor.timer.stop()
+            
+            # Handle multi-take movement
+            if hasattr(self.window, "move_multiple_takes"):
+                selected_take_names = [item.take_name for item in selected_items if hasattr(item, 'take_name')]
+                self.window.move_multiple_takes(selected_take_names, target_take_name)
+            
+            # Full refresh needed after move to show new order
+            if hasattr(self.window, "update_take_list"):
+                self.window.update_take_list()
+                
+            # Update monitor state to match current reality BEFORE restarting
+            if hasattr(self.window, 'monitor'):
+                system = FBSystem()
+                current_take_names = [system.Scene.Takes[i].Name for i in range(len(system.Scene.Takes))]
+                self.window.monitor.last_take_count = len(system.Scene.Takes)
+                self.window.monitor.last_take_names = current_take_names[:]  # Make a proper copy
+                
+            # Find and select the moved takes in their new positions
+            def select_moved_takes():
+                selected_take_names = [item.take_name for item in selected_items if hasattr(item, 'take_name')]
+                # Clear current selection
+                self.clearSelection()
+                # Select all moved takes
+                for i in range(self.count()):
+                    item = self.item(i)
+                    if item and hasattr(item, 'take_name') and item.take_name in selected_take_names:
+                        item.setSelected(True)
+            
+            QTimer.singleShot(10, select_moved_takes)
+            
+            # Restart the monitor after a delay with proper state sync timing
+            if monitor_was_running:
+                def restart_monitor():
+                    if hasattr(self.window, 'monitor') and hasattr(self.window.monitor, 'timer'):
+                        self.window.monitor.timer.start(500)
+                
+                # Give extra time to ensure everything is settled before restart
+                QTimer.singleShot(500, restart_monitor)
         
     def editItem(self, item):
         """Start editing a list item in-place"""
@@ -383,6 +496,31 @@ class TakeHandlerWindow(QMainWindow):
         
         button_layout.addWidget(self.new_take_button)
         button_layout.addStretch()
+        
+        # Create a small sort button with sort symbol, aligned to the right
+        self.sort_button = QPushButton("≡")
+        self.sort_button.setToolTip("Sort takes A→Z (multiple selected: sort selected only, single/none: sort all)")
+        self.sort_button.setFixedSize(18, 18)  # Same size as + button
+        self.sort_button.setStyleSheet("""
+            QPushButton {
+                background-color: #7f8c8d;
+                color: white;
+                font-weight: bold;
+                border-radius: 0px;
+                border: none;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #6c7b7d;
+            }
+            QPushButton:pressed {
+                background-color: #5a6061;
+            }
+        """)
+        self.sort_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.sort_button.clicked.connect(self._sort_takes_alphabetically)
+        
+        button_layout.addWidget(self.sort_button)
         main_layout.addLayout(button_layout)
         
         # The window can still be resized using the window edges
@@ -458,14 +596,57 @@ class TakeHandlerWindow(QMainWindow):
             system = FBSystem()
             scene = system.Scene
             
-            # Get the takes list
-            takes = [scene.Takes[i] for i in range(len(scene.Takes))]
+            # DEBUG: Print UI order before move
+            print(f"\n=== REORDER DEBUG START ===")
+            print(f"UI Move: row {source_row} -> row {target_row}")
+            print("UI Take Order BEFORE move:")
+            for i in range(self.take_list.count()):
+                item = self.take_list.item(i)
+                if item and not item.isHidden():
+                    print(f"  UI[{i}]: {item.take_name}")
+            
+            # DEBUG: Print native order before move
+            print("Native Take Order BEFORE move:")
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                print(f"  Native[{i}]: {strip_prefix(take.Name)}")
+            
+            # Get the take names from UI positions (handles hidden takes correctly)
+            source_item = self.take_list.item(source_row)
+            target_item = self.take_list.item(target_row)
+            
+            if not source_item or not target_item:
+                print("ERROR: Could not get source or target items")
+                return
+                
+            source_take_name = source_item.take_name
+            target_take_name = target_item.take_name
+            print(f"Moving: '{source_take_name}' to position of '{target_take_name}'")
+            
+            # Find the actual scene positions for these takes
+            source_scene_pos = -1
+            target_scene_pos = -1
+            source_take = None
+            target_take = None
+            
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                take_name_clean = strip_prefix(take.Name)
+                if take_name_clean == source_take_name:
+                    source_scene_pos = i
+                    source_take = take
+                elif take_name_clean == target_take_name:
+                    target_scene_pos = i
+                    target_take = take
+                    
+            if source_scene_pos == -1 or target_scene_pos == -1 or not source_take:
+                print(f"ERROR: Could not find takes in scene. Source pos: {source_scene_pos}, Target pos: {target_scene_pos}")
+                return
+            
+            print(f"Scene positions: source at [{source_scene_pos}], target at [{target_scene_pos}]")
             
             # Remember the current take
             current_take = system.CurrentTake
-            
-            # Get the take that needs to be moved
-            take_to_move = takes[source_row]
             
             # Get the Takes List from the first take's destination
             first_take = scene.Takes[0]
@@ -475,15 +656,17 @@ class TakeHandlerWindow(QMainWindow):
             src_id = -1
             for i in range(takes_list.GetSrcCount()):
                 src = takes_list.GetSrc(i)
-                if src == take_to_move:
+                if src == source_take:
                     src_id = i
                     break
             
             if src_id == -1:
+                print("ERROR: Could not find take in the takes list sources")
                 raise Exception("Could not find take in the takes list sources")
             
-            # Calculate the destination ID
-            dst_id = target_row
+            # Calculate the destination ID using the target take's scene position
+            dst_id = target_scene_pos
+            print(f"MoveSrcAt: moving from source_id[{src_id}] to dest_id[{dst_id}]")
             
             # Now use MoveSrcAt as recommended
             takes_list.MoveSrcAt(src_id, dst_id)
@@ -491,16 +674,598 @@ class TakeHandlerWindow(QMainWindow):
             # Update the scene
             scene.Evaluate()
             
+            # DEBUG: Print native order after move
+            print("Native Take Order AFTER move:")
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                print(f"  Native[{i}]: {strip_prefix(take.Name)}")
+            
             # Restore the current take
             system.CurrentTake = current_take
             
-            # Update our UI list
             self.update_take_list()
             
         except Exception as e:
+            print(f"ERROR in reorder_takes: {e}")
             pass  # Error reordering takes
             QMessageBox.warning(self, "Error", f"Failed to reorder takes: {e}")
             self.update_take_list()
+    
+    def reorder_takes_by_name(self, source_take_name, target_take_name):
+        """Reorder takes using take names instead of UI positions."""
+        try:
+            if not source_take_name or not target_take_name or source_take_name == target_take_name:
+                return
+                
+            system = FBSystem()
+            scene = system.Scene
+            
+            
+            # Find the actual scene positions for these takes
+            source_scene_pos = -1
+            target_scene_pos = -1
+            source_take = None
+            target_take = None
+            
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                take_name_clean = strip_prefix(take.Name)
+                if take_name_clean == source_take_name:
+                    source_scene_pos = i
+                    source_take = take
+                elif take_name_clean == target_take_name:
+                    target_scene_pos = i
+                    target_take = take
+                    
+            if source_scene_pos == -1 or target_scene_pos == -1 or not source_take:
+                print(f"ERROR: Could not find takes in scene. Source pos: {source_scene_pos}, Target pos: {target_scene_pos}")
+                return
+            
+            # Remember the current take
+            current_take = system.CurrentTake
+            
+            # Get the Takes List from the first take's destination
+            first_take = scene.Takes[0]
+            takes_list = first_take.GetDst(1)  # This is the Takes List folder
+            
+            # Find the Source ID (current position of our take in the takes list)
+            src_id = -1
+            for i in range(takes_list.GetSrcCount()):
+                src = takes_list.GetSrc(i)
+                if src == source_take:
+                    src_id = i
+                    break
+            
+            if src_id == -1:
+                print("ERROR: Could not find take in the takes list sources")
+                # Try alternative approach - look for it by name
+                for i in range(takes_list.GetSrcCount()):
+                    src = takes_list.GetSrc(i)
+                    if hasattr(src, 'Name') and strip_prefix(src.Name) == source_take_name:
+                        src_id = i
+                        break
+                
+                if src_id == -1:
+                    raise Exception("Could not find take in the takes list sources")
+            
+            # Find where the target take is in the takes list
+            target_id = -1
+            for i in range(takes_list.GetSrcCount()):
+                src = takes_list.GetSrc(i)
+                if src == target_take:
+                    target_id = i
+                    break
+            
+            if target_id == -1:
+                # Try by name
+                for i in range(takes_list.GetSrcCount()):
+                    src = takes_list.GetSrc(i)
+                    if hasattr(src, 'Name') and strip_prefix(src.Name) == target_take_name:
+                        target_id = i
+                        break
+                        
+                if target_id == -1:
+                    raise Exception("Could not find target take in the takes list sources")
+            
+            # Calculate final target position accounting for direction of movement
+            # When moving down, we need to account for the source take being removed first
+            if src_id < target_scene_pos:
+                # Moving down: target position shifts down by 1 when source is removed
+                final_target_id = target_scene_pos  # target_scene_pos + 1 - 1
+            else:
+                # Moving up: target position stays the same
+                final_target_id = target_scene_pos + 1
+            
+            # Ensure we don't exceed bounds
+            if final_target_id > takes_list.GetSrcCount():
+                final_target_id = takes_list.GetSrcCount()
+            takes_list.MoveSrcAt(src_id, final_target_id)
+            
+            # Update the scene
+            scene.Evaluate()
+            
+            # Restore the current take
+            system.CurrentTake = current_take
+            
+        except Exception as e:
+            print(f"ERROR in reorder_takes_by_name: {e}")
+            pass  # Error reordering takes
+            QMessageBox.warning(self, "Error", f"Failed to reorder takes: {e}")
+    
+    def move_multiple_takes(self, take_names, target_take_name):
+        """Move multiple takes as a group to a new position."""
+        try:
+            if not take_names or not target_take_name:
+                return
+            
+            system = FBSystem()
+            scene = system.Scene
+            
+            # Find target position
+            target_scene_pos = -1
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                if strip_prefix(take.Name) == target_take_name:
+                    target_scene_pos = i
+                    break
+            
+            if target_scene_pos == -1:
+                return
+            
+            # Remember the current take
+            current_take = system.CurrentTake
+            
+            # Get the Takes List
+            first_take = scene.Takes[0]
+            takes_list = first_take.GetDst(1) if len(scene.Takes) > 0 else None
+            
+            if not takes_list:
+                return
+            
+            # Find all source takes and their current positions
+            source_takes = []
+            for take_name in take_names:
+                for i in range(len(scene.Takes)):
+                    take = scene.Takes[i]
+                    if strip_prefix(take.Name) == take_name:
+                        source_takes.append((take, take_name, i))
+                        break
+            
+            if not source_takes:
+                return
+            
+            # Sort source takes by their current position (reverse order for moving)
+            source_takes.sort(key=lambda x: x[2], reverse=True)
+            
+            # Move each take to the position after the target (where the line appears)
+            # Start from the last take and work backwards to maintain relative order
+            moves_completed = 0
+            for i, (take_obj, take_name, old_pos) in enumerate(source_takes):
+                # Find current source ID in takes list
+                src_id = -1
+                for j in range(takes_list.GetSrcCount()):
+                    src = takes_list.GetSrc(j)
+                    if src == take_obj:
+                        src_id = j
+                        break
+                
+                if src_id >= 0:
+                    # Calculate final target position accounting for direction of movement
+                    # When moving down, we need to account for the source takes being removed first
+                    if src_id < target_scene_pos:
+                        # Moving down: target position shifts down by number of takes already moved
+                        final_target_id = target_scene_pos - moves_completed + i
+                    else:
+                        # Moving up: target position stays the same
+                        final_target_id = target_scene_pos + 1 + i
+                    
+                    # Ensure we don't exceed bounds
+                    if final_target_id > takes_list.GetSrcCount():
+                        final_target_id = takes_list.GetSrcCount()
+                    takes_list.MoveSrcAt(src_id, final_target_id)
+                    moves_completed += 1
+            
+            # Update the scene
+            scene.Evaluate()
+            
+            # Restore the current take
+            system.CurrentTake = current_take
+            
+        except Exception as e:
+            print(f"ERROR in move_multiple_takes: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to move takes: {e}")
+    
+    def move_group_with_contents(self, source_group_name, target_take_name):
+        """Move a group and all its contents to a new position, auto-grouping orphaned takes."""
+        try:
+            system = FBSystem()
+            scene = system.Scene
+            
+            # Remember the current take
+            current_take = system.CurrentTake
+            
+            # Get all takes and analyze group structure
+            all_takes = []
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                take_name = strip_prefix(take.Name)
+                all_takes.append((take, take_name, i))
+            
+            # Find the source group and its contents
+            source_group = None
+            source_group_contents = []
+            
+            groups = self._analyze_take_groups(all_takes)
+            for group in groups:
+                if group['header'] and group['header'][1] == source_group_name:
+                    source_group = group
+                    source_group_contents = [group['header']] + group['members']
+                    break
+            
+            if not source_group:
+                # Fallback to regular move if group not found
+                self.reorder_takes_by_name(source_group_name, target_take_name)
+                return
+            
+            # Find target position
+            target_position = -1
+            for take, take_name, position in all_takes:
+                if take_name == target_take_name:
+                    target_position = position
+                    break
+            
+            if target_position == -1:
+                return
+            
+            # Check if moving the group would leave ungrouped takes that need auto-grouping
+            orphaned_takes = self._find_orphaned_takes_after_group_move(groups, source_group, target_position)
+            
+            # Get the takes list for manipulation
+            first_take = scene.Takes[0]
+            takes_list = first_take.GetDst(1)
+            
+            if not takes_list:
+                return
+            
+            # Step 1: Create auto-group for orphaned takes if needed
+            auto_group_take = None
+            if orphaned_takes:
+                auto_group_take = self._create_auto_group(orphaned_takes)
+                if auto_group_take:
+                    # Refresh our takes list since we added a new take
+                    all_takes = []
+                    for i in range(len(scene.Takes)):
+                        take = scene.Takes[i]
+                        take_name = strip_prefix(take.Name)
+                        all_takes.append((take, take_name, i))
+                    
+                    # Find the new target position (might have shifted due to auto-group creation)
+                    for take, take_name, position in all_takes:
+                        if take_name == target_take_name:
+                            target_position = position
+                            break
+            
+            # Step 2: Move the entire group to new position using individual moves
+            self._move_group_sequentially(takes_list, source_group_contents, target_position)
+            
+            # Update the scene
+            scene.Evaluate()
+            
+            # Restore the current take
+            if current_take:
+                system.CurrentTake = current_take
+            
+        except Exception as e:
+            print(f"ERROR in move_group_with_contents: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to move group: {e}")
+    
+    def _find_orphaned_takes_after_group_move(self, groups, moving_group, target_position):
+        """Find takes that would become orphaned after moving a group."""
+        orphaned = []
+        
+        # Find the index of the moving group
+        moving_group_index = -1
+        for i, group in enumerate(groups):
+            if group == moving_group:
+                moving_group_index = i
+                break
+        
+        if moving_group_index == -1:
+            return orphaned
+        
+        # Find where the group is moving to
+        target_group_index = -1
+        for i, group in enumerate(groups):
+            if group['header']:
+                if group['header'][2] <= target_position <= group['header'][2] + len(group['members']):
+                    target_group_index = i
+                    break
+            else:
+                # Ungrouped section
+                for member in group['members']:
+                    if member[2] == target_position:
+                        target_group_index = i
+                        break
+                if target_group_index != -1:
+                    break
+        
+        # Determine what gets orphaned based on movement direction
+        if target_group_index > moving_group_index:
+            # Moving down - check for ungrouped takes immediately after the moving group
+            if moving_group_index + 1 < len(groups):
+                next_group = groups[moving_group_index + 1]
+                if next_group['header'] is None:  # Ungrouped takes
+                    orphaned = next_group['members']
+        else:
+            # Moving up - check for ungrouped takes at the target location
+            if target_group_index != -1 and target_group_index < len(groups):
+                target_group = groups[target_group_index]
+                if target_group['header'] is None:  # Target is ungrouped takes
+                    orphaned = target_group['members']
+        
+        return orphaned
+    
+    def _create_auto_group(self, orphaned_takes):
+        """Create an auto-group for orphaned takes."""
+        try:
+            system = FBSystem()
+            
+            # Generate a unique group name
+            group_counter = 1
+            while True:
+                group_name = f"== Group{group_counter:02d} =="
+                # Check if this name already exists
+                name_exists = False
+                for i in range(len(system.Scene.Takes)):
+                    take = system.Scene.Takes[i]
+                    if strip_prefix(take.Name) == strip_prefix(group_name):
+                        name_exists = True
+                        break
+                
+                if not name_exists:
+                    break
+                group_counter += 1
+            
+            # Create the group take and insert it before the first orphaned take
+            if orphaned_takes:
+                first_orphaned_pos = orphaned_takes[0][2]  # Position of first orphaned take
+                
+                # Create the group take
+                auto_group_take = FBTake(group_name)
+                system.Scene.Takes.append(auto_group_take)
+                
+                # Move it to the correct position (before first orphaned take)
+                first_take = system.Scene.Takes[0]
+                takes_list = first_take.GetDst(1)
+                
+                if takes_list:
+                    # Find the auto group in the takes list (it's at the end)
+                    auto_group_src_id = -1
+                    for i in range(takes_list.GetSrcCount()):
+                        src = takes_list.GetSrc(i)
+                        if src == auto_group_take:
+                            auto_group_src_id = i
+                            break
+                    
+                    if auto_group_src_id >= 0:
+                        takes_list.MoveSrcAt(auto_group_src_id, first_orphaned_pos)
+                        system.Scene.Evaluate()
+                
+                return auto_group_take
+                
+        except Exception as e:
+            print(f"ERROR creating auto-group: {e}")
+            
+        return None
+    
+    def _move_group_sequentially(self, takes_list, group_contents, target_position):
+        """Move group contents one by one to the target position."""
+        try:
+            # Sort group contents by their original position
+            group_contents.sort(key=lambda x: x[2])
+            
+            # Move each take in the group, starting from the header
+            for i, (take_obj, take_name, old_pos) in enumerate(group_contents):
+                # Find current source ID in takes list
+                src_id = -1
+                for j in range(takes_list.GetSrcCount()):
+                    src = takes_list.GetSrc(j)
+                    if src == take_obj:
+                        src_id = j
+                        break
+                
+                if src_id >= 0:
+                    # Calculate target ID for this specific take
+                    # The first take (group header) goes to target_position
+                    # Subsequent takes go immediately after
+                    final_target_id = target_position + i
+                    
+                    # Ensure we don't exceed bounds
+                    max_pos = takes_list.GetSrcCount() - 1
+                    if final_target_id > max_pos:
+                        final_target_id = max_pos
+                    
+                    # Only move if the position is different
+                    if src_id != final_target_id:
+                        takes_list.MoveSrcAt(src_id, final_target_id)
+                        
+        except Exception as e:
+            print(f"ERROR in _move_group_sequentially: {e}")
+    
+    def _sort_takes_alphabetically(self):
+        """Sort takes alphabetically in ascending order (A to Z). If multiple takes are selected, sort only those. If only one take is selected, sort all takes."""
+        system = FBSystem()
+        
+        # Remember the current take to restore it later
+        current_take = system.CurrentTake
+        
+        # Get selected items
+        selected_items = self.take_list.selectedItems()
+        
+        # Show confirmation popup
+        if len(selected_items) > 1:
+            count_text = f"{len(selected_items)} selected takes"
+        else:
+            total_takes = len(system.Scene.Takes)
+            count_text = f"all {total_takes} takes"
+        
+        result = QMessageBox.question(
+            self, 
+            "Sort Takes", 
+            f"Do you want to sort {count_text}?",
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.Yes
+        )
+        
+        if result != QMessageBox.Yes:
+            return
+        
+        try:
+            # Get all takes and analyze group structure
+            all_scene_takes = []
+            for i in range(len(system.Scene.Takes)):
+                take = system.Scene.Takes[i]
+                take_name = strip_prefix(take.Name)
+                all_scene_takes.append((take, take_name, i))
+            
+            # Determine which takes to sort
+            if len(selected_items) > 1:
+                # Sort only selected takes when multiple are selected
+                selected_take_names = [item.take_name for item in selected_items]
+                takes_to_sort = [t for t in all_scene_takes if t[1] in selected_take_names]
+            else:
+                # Sort all takes (when no selection or only one take selected)
+                takes_to_sort = all_scene_takes
+            
+            # Group-aware sorting logic
+            groups = self._analyze_take_groups(all_scene_takes)
+            
+            sorted_operations = self._get_group_aware_sort_operations(groups, takes_to_sort)
+            
+            # Execute the sorting operations
+            if sorted_operations and len(system.Scene.Takes) > 0:
+                first_take = system.Scene.Takes[0]
+                takes_list = first_take.GetDst(1)
+                
+                if takes_list:
+                    # Apply all sorting operations
+                    for take_obj, target_position in sorted_operations:
+                        # Find current position of this take in the takes list
+                        src_id = -1
+                        for j in range(takes_list.GetSrcCount()):
+                            src = takes_list.GetSrc(j)
+                            if src == take_obj:
+                                src_id = j
+                                break
+                        
+                        if src_id >= 0 and src_id != target_position:
+                            takes_list.MoveSrcAt(src_id, target_position)
+                    
+                    system.Scene.Evaluate()
+            
+            # Restore the original current take
+            if current_take:
+                system.CurrentTake = current_take
+            
+            self.update_take_list()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to sort takes: {e}")
+            self.update_take_list()
+    
+    def _analyze_take_groups(self, all_takes):
+        """Analyze the take structure to identify groups and their members."""
+        groups = []
+        current_group = None
+        ungrouped_takes = []
+        
+        for take_obj, take_name, position in all_takes:
+            if is_group_take(take_name):
+                # This is a group header
+                # First, add any accumulated ungrouped takes as a virtual group
+                if ungrouped_takes:
+                    groups.append({
+                        'header': None,
+                        'members': ungrouped_takes[:]
+                    })
+                    ungrouped_takes = []
+                
+                # Close previous group if any
+                if current_group:
+                    groups.append(current_group)
+                
+                # Start new group
+                current_group = {
+                    'header': (take_obj, take_name, position),
+                    'members': []
+                }
+            else:
+                # This is a regular take
+                if current_group:
+                    # Add to current group
+                    current_group['members'].append((take_obj, take_name, position))
+                else:
+                    # No current group - add to ungrouped takes
+                    ungrouped_takes.append((take_obj, take_name, position))
+        
+        # Add any remaining ungrouped takes
+        if ungrouped_takes:
+            groups.append({
+                'header': None,
+                'members': ungrouped_takes[:]
+            })
+        
+        # Don't forget the last group
+        if current_group:
+            groups.append(current_group)
+        
+        return groups
+    
+    def _get_group_aware_sort_operations(self, groups, takes_to_sort):
+        """Generate sorting operations that respect group boundaries."""
+        operations = []
+        takes_to_sort_set = {t[0] for t in takes_to_sort}  # Convert to set of take objects for fast lookup
+        
+        for group in groups:
+            # Sort takes within this group that are in our sort list
+            group_takes_to_sort = []
+            
+            # Check if group header needs sorting
+            if group['header'] and group['header'][0] in takes_to_sort_set:
+                group_takes_to_sort.append(group['header'])
+            
+            # Check which members need sorting
+            members_to_sort = [member for member in group['members'] if member[0] in takes_to_sort_set]
+            
+            if members_to_sort:
+                # Sort the members alphabetically
+                members_to_sort.sort(key=lambda x: x[1].lower())
+                
+                # Determine where to place the sorted members
+                if group['header']:
+                    # Group has a header - members go right after the header
+                    start_position = group['header'][2] + 1
+                    
+                    # Add header to operations if it's being sorted
+                    if group['header'][0] in takes_to_sort_set:
+                        operations.append((group['header'][0], group['header'][2]))
+                    
+                    # Add sorted members
+                    for i, member in enumerate(members_to_sort):
+                        target_pos = start_position + i
+                        operations.append((member[0], target_pos))
+                else:
+                    # No group header - these are ungrouped takes, maintain their relative positions
+                    # but sort them within their section
+                    if group['members']:
+                        original_positions = [member[2] for member in group['members']]
+                        original_positions.sort()
+                        
+                        for i, member in enumerate(members_to_sort):
+                            if i < len(original_positions):
+                                operations.append((member[0], original_positions[i]))
+        
+        return operations
     
     def _create_new_take(self):
         name, ok = QInputDialog.getText(self, "New Take", "Enter take name:")
@@ -600,6 +1365,8 @@ class TakeHandlerWindow(QMainWindow):
             menu.addSeparator()
             
             # Operations on multiple takes
+            create_group_action = menu.addAction(f"Create Group for {len(selected_items)} Takes")
+            menu.addSeparator()
             duplicate_action = menu.addAction(f"Duplicate {len(selected_items)} Takes")
             rename_action = menu.addAction(f"Rename {len(selected_items)} Takes")
             menu.addSeparator()
@@ -620,6 +1387,8 @@ class TakeHandlerWindow(QMainWindow):
                 self._set_favorite_for_multiple(selected_items, True)
             elif action == remove_from_favorites:
                 self._set_favorite_for_multiple(selected_items, False)
+            elif action == create_group_action:
+                self._create_group_for_selected(selected_items)
             elif action == duplicate_action:
                 self._duplicate_takes(selected_items)
             elif action == rename_action:
@@ -767,9 +1536,155 @@ class TakeHandlerWindow(QMainWindow):
         self.update_take_list()
     
     # Methods for handling multiple takes
+    def _create_group_for_selected(self, items):
+        """Create a new group for the selected takes."""
+        try:
+            system = FBSystem()
+            scene = system.Scene
+            
+            # Find the earliest position among selected takes
+            earliest_pos = float('inf')
+            selected_take_names = []
+            
+            for item in items:
+                if not getattr(item, 'is_group', False):  # Only process actual takes, not groups
+                    take_name = item.take_name
+                    selected_take_names.append(take_name)
+                    
+                    # Find position in scene
+                    for i in range(len(scene.Takes)):
+                        take = scene.Takes[i]
+                        if hasattr(take, 'Name') and strip_prefix(take.Name) == take_name:
+                            earliest_pos = min(earliest_pos, i)
+                            break
+            
+            if not selected_take_names:
+                return
+            
+            # Analyze selected take names to find most common word
+            all_words = []
+            for take_name in selected_take_names:
+                # Split by common separators and filter out very short words
+                words = re.split(r'[_\-\s]+', take_name.lower())
+                words = [word.strip() for word in words if len(word) >= 2]
+                all_words.extend(words)
+            
+            # Find most common word
+            if all_words:
+                word_counts = {}
+                for word in all_words:
+                    word_counts[word] = word_counts.get(word, 0) + 1
+                
+                # Sort words by count (descending)
+                sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+                most_common_word = sorted_words[0][0]
+                base_group_name = most_common_word.upper()
+            else:
+                # Fallback to generic name if no words found
+                base_group_name = "GROUP"
+                sorted_words = []
+            
+            # Generate unique group name
+            group_name = f"== {base_group_name} =="
+            group_num = 1
+            
+            # Check if base name exists
+            exists = False
+            for i in range(len(scene.Takes)):
+                take = scene.Takes[i]
+                if hasattr(take, 'Name') and strip_prefix(take.Name) == group_name:
+                    exists = True
+                    break
+            
+            # If it exists, try to find a second common word before using numbers
+            if exists and len(sorted_words) > 1:
+                num_takes = len(selected_take_names)
+                
+                # Look for second most common word with >40% occurrence
+                for word, count in sorted_words[1:]:
+                    occurrence_rate = count / num_takes
+                    if occurrence_rate > 0.4:  # More than 40% occurrence
+                        second_word = word.upper()
+                        candidate_name = f"== {base_group_name} {second_word} =="
+                        
+                        # Check if this combination exists
+                        candidate_exists = False
+                        for i in range(len(scene.Takes)):
+                            take = scene.Takes[i]
+                            if hasattr(take, 'Name') and strip_prefix(take.Name) == candidate_name:
+                                candidate_exists = True
+                                break
+                        
+                        if not candidate_exists:
+                            group_name = candidate_name
+                            exists = False
+                            break
+            
+            # If still exists or no good second word found, use numbered variants
+            if exists:
+                while True:
+                    group_name = f"== {base_group_name} {group_num:02d} =="
+                    exists = False
+                    for i in range(len(scene.Takes)):
+                        take = scene.Takes[i]
+                        if hasattr(take, 'Name') and strip_prefix(take.Name) == group_name:
+                            exists = True
+                            break
+                    
+                    if not exists:
+                        break
+                    group_num += 1
+            
+            # Create the group take
+            new_take = FBTake(group_name)
+            scene.Takes.append(new_take)
+            
+            # Move the group take to the correct position
+            if len(scene.Takes) > 0:
+                first_take = scene.Takes[0]
+                takes_list = first_take.GetDst(1)
+                
+                if takes_list:
+                    # Find the new group take in the takes list (it's at the end)
+                    group_src_id = -1
+                    for i in range(takes_list.GetSrcCount()):
+                        src = takes_list.GetSrc(i)
+                        if src == new_take:
+                            group_src_id = i
+                            break
+                    
+                    if group_src_id >= 0:
+                        takes_list.MoveSrcAt(group_src_id, earliest_pos)
+                        scene.Evaluate()
+            
+            # Mark this as a group in our data
+            self.take_data[group_name] = {'is_group': True}
+            
+            # Group the selected takes under this group
+            for take_name in selected_take_names:
+                if take_name not in self.take_data:
+                    self.take_data[take_name] = {}
+                self.take_data[take_name]['group'] = group_name
+            
+            # Expand the group by default
+            self.expanded_groups[group_name] = True
+            
+            self._save_config()
+            self.update_take_list()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to create group: {e}")
+
     def _duplicate_takes(self, items):
         system = FBSystem()
         
+        # Remember the current take to restore it later
+        current_take = system.CurrentTake
+        
+        # Create a list to track original takes and their duplicates for positioning
+        duplicate_pairs = []
+        
+        # First pass: Create all duplicates
         for item in items:
             take_name = item.take_name
             original_take = None
@@ -785,8 +1700,61 @@ class TakeHandlerWindow(QMainWindow):
                 try:
                     # Use CopyTake to properly duplicate the take with all animation data
                     new_take = original_take.CopyTake(new_name)
+                    duplicate_pairs.append((original_take, new_take))
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to duplicate take {take_name}: {e}")
+        
+        # Second pass: Position all duplicates correctly
+        if duplicate_pairs:
+            # Get the Takes List
+            first_take = system.Scene.Takes[0]
+            takes_list = first_take.GetDst(1) if len(system.Scene.Takes) > 0 else None
+            
+            if takes_list:
+                # We need to position duplicates in reverse order to avoid index shifting issues
+                # Start from the last selected item and work backwards
+                for original_take, new_take in reversed(duplicate_pairs):
+                    try:
+                        # Find current positions of both takes
+                        original_pos = -1
+                        new_take_pos = -1
+                        
+                        for i in range(len(system.Scene.Takes)):
+                            take = system.Scene.Takes[i]
+                            if take == original_take:
+                                original_pos = i
+                            elif take == new_take:
+                                new_take_pos = i
+                                
+                        # Only move if we found both takes and the new take isn't already in the right position
+                        if original_pos >= 0 and new_take_pos >= 0 and new_take_pos != original_pos + 1:
+                            # Find the source ID in the takes list
+                            src_id = -1
+                            for i in range(takes_list.GetSrcCount()):
+                                src = takes_list.GetSrc(i)
+                                if src == new_take:
+                                    src_id = i
+                                    break
+                            
+                            if src_id >= 0:
+                                # Target position is right after the original take
+                                target_id = original_pos + 1
+                                # Make sure target_id doesn't exceed the list bounds
+                                if target_id > takes_list.GetSrcCount():
+                                    target_id = takes_list.GetSrcCount()
+                                    
+                                takes_list.MoveSrcAt(src_id, target_id)
+                                
+                    except Exception as e:
+                        # Continue with other duplicates even if one fails
+                        continue
+                
+                # Evaluate the scene after all moves
+                system.Scene.Evaluate()
+        
+        # Restore the original current take
+        if current_take:
+            system.CurrentTake = current_take
         
         self.update_take_list()
         
@@ -1135,7 +2103,6 @@ class TakeHandlerWindow(QMainWindow):
             # Update the scene
             system.Scene.Evaluate()
             
-            # Update the UI
             self.update_take_list()
             
         except Exception as e:
@@ -1145,20 +2112,74 @@ class TakeHandlerWindow(QMainWindow):
     def _duplicate_take(self, take_name):
         system = FBSystem()
         original_take = None
+        
+        # Remember the current take to restore it later
+        current_take = system.CurrentTake
+        
+        # Find the original take
         for i in range(len(system.Scene.Takes)):
             take = system.Scene.Takes[i]
             if strip_prefix(take.Name) == take_name:
                 original_take = take
                 break
-        if original_take:
-            new_name, ok = QInputDialog.getText(self, "Duplicate Take", "Enter new take name:", QLineEdit.Normal, f"{take_name}_copy")
-            if ok and new_name.strip():
-                try:
-                    # Use CopyTake to properly duplicate the take with all animation data
-                    new_take = original_take.CopyTake(new_name.strip())
-                    self.update_take_list()
-                except Exception as e:
-                    QMessageBox.warning(self, "Error", f"Failed to duplicate take: {e}")
+                
+        if not original_take:
+            return
+            
+        try:
+            # Auto-generate name without popup
+            new_name = f"{take_name}_copy"
+            
+            # Use CopyTake to properly duplicate the take with all animation data
+            new_take = original_take.CopyTake(new_name)
+            
+            # Now find both takes' positions AFTER the duplication
+            original_pos = -1
+            new_take_pos = -1
+            
+            for i in range(len(system.Scene.Takes)):
+                take = system.Scene.Takes[i]
+                take_clean_name = strip_prefix(take.Name)
+                if take == original_take:
+                    original_pos = i
+                elif take == new_take:
+                    new_take_pos = i
+                    
+            # Only move if we found both takes and the new take isn't already in the right position
+            if original_pos >= 0 and new_take_pos >= 0 and new_take_pos != original_pos + 1:
+                # Get the Takes List from the first take's destination
+                first_take = system.Scene.Takes[0]
+                takes_list = first_take.GetDst(1)  # This is the Takes List folder
+                
+                if takes_list:
+                    # Find the source and destination IDs in the takes list
+                    src_id = -1
+                    for i in range(takes_list.GetSrcCount()):
+                        src = takes_list.GetSrc(i)
+                        if src == new_take:
+                            src_id = i
+                            break
+                    
+                    if src_id >= 0:
+                        # Target position is right after the original take
+                        target_id = original_pos + 1
+                        # Make sure target_id doesn't exceed the list bounds
+                        if target_id > takes_list.GetSrcCount():
+                            target_id = takes_list.GetSrcCount()
+                            
+                        takes_list.MoveSrcAt(src_id, target_id)
+                        system.Scene.Evaluate()
+            
+            # Restore the original current take
+            if current_take:
+                system.CurrentTake = current_take
+            
+            self.update_take_list()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to duplicate take: {e}")
+            # Make sure UI is updated even if there was an error
+            self.update_take_list()
     
     def _rename_take_inline(self, take_name, new_name):
         """Rename a take using the inline editor input"""
@@ -1233,7 +2254,12 @@ class TakeHandlerWindow(QMainWindow):
                     
                     take_to_rename.Name = new_name_with_prefix
                     self._save_config()
+                    # Preserve scroll position using deferred restoration
+                    scrollbar = self.take_list.verticalScrollBar()
+                    scroll_value = scrollbar.value()
                     self.update_take_list()
+                    # Use QTimer to restore scroll position after UI update completes
+                    QTimer.singleShot(10, lambda: scrollbar.setValue(scroll_value))
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to rename take: {e}")
     
@@ -1251,11 +2277,17 @@ class TakeHandlerWindow(QMainWindow):
                 is_current = (item.take_name == current_take_clean)
                 item.update_display(is_current)
                 
-    def update_take_list(self):
+    def update_take_list(self, preserve_scroll=True):
         """Update the custom UI list using the stripped names for display."""
         selected_row = self.take_list.currentRow()
         if hasattr(self.take_list, 'internal_drop') and self.take_list.internal_drop:
             return
+        
+        # Save scroll position before clearing
+        scroll_value = 0
+        if preserve_scroll:
+            scrollbar = self.take_list.verticalScrollBar()
+            scroll_value = scrollbar.value()
         
         self.take_list.clear()
         system = FBSystem()
@@ -1302,8 +2334,13 @@ class TakeHandlerWindow(QMainWindow):
             if not item.visible:
                 item.setHidden(True)
         
-        if 0 <= selected_row < self.take_list.count():
-            self.take_list.setCurrentRow(selected_row)
+        # Don't restore selection to avoid interfering with the list
+        # Selection will be handled by the dropEvent's delayed selection
+        
+        # Restore scroll position if requested
+        if preserve_scroll and scroll_value > 0:
+            scrollbar = self.take_list.verticalScrollBar()
+            QTimer.singleShot(0, lambda: scrollbar.setValue(scroll_value))
             
     def _on_item_clicked(self, index):
         """Handle clicks on take items, specifically for collapsing/expanding groups."""
