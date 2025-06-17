@@ -353,7 +353,7 @@ class DraggableListWidget(QListWidget):
         
     def editItem(self, item):
         """Start editing a list item in-place"""
-        if not item or getattr(item, 'is_group', False):  # Don't edit group items in-place
+        if not item:
             return
             
         try:
@@ -586,6 +586,32 @@ class TakeHandlerWindow(QMainWindow):
             if tag:
                 tags.add(tag)
         return sorted(list(tags))
+    
+    def _get_next_group_color(self):
+        """Generate a muted, pleasant color for a new group with maximum distinction between adjacent colors."""
+        # Define a palette ordered for maximum visual distinction between adjacent colors
+        muted_colors = [
+            QColor(150, 200, 170),  # Muted green (start with green)
+            QColor(200, 150, 180),  # Muted pink (opposite hue)
+            QColor(150, 180, 200),  # Muted blue (cool)
+            QColor(200, 170, 150),  # Muted orange/brown (warm)
+            QColor(180, 150, 200),  # Muted purple (violet)
+            QColor(200, 200, 150),  # Muted beige/yellow (light)
+            QColor(150, 200, 200),  # Muted cyan (blue-green)
+            QColor(200, 180, 150),  # Muted yellow/tan (yellow-orange)
+            QColor(170, 170, 200),  # Muted lavender (purple-blue)
+            QColor(180, 200, 150),  # Muted lime (yellow-green)
+        ]
+        
+        # Count existing groups with assigned colors to determine which color to use next
+        group_count = 0
+        for take_name, data in self.take_data.items():
+            if data.get('is_group', False) and data.get('color'):
+                group_count += 1
+        
+        # Cycle through colors
+        color_index = group_count % len(muted_colors)
+        return muted_colors[color_index]
     
     def reorder_takes(self, source_row, target_row):
         """Reorder takes using the MotionBuilder plug system to match Navigator's order with our UI."""
@@ -875,223 +901,6 @@ class TakeHandlerWindow(QMainWindow):
             print(f"ERROR in move_multiple_takes: {e}")
             QMessageBox.warning(self, "Error", f"Failed to move takes: {e}")
     
-    def move_group_with_contents(self, source_group_name, target_take_name):
-        """Move a group and all its contents to a new position, auto-grouping orphaned takes."""
-        try:
-            system = FBSystem()
-            scene = system.Scene
-            
-            # Remember the current take
-            current_take = system.CurrentTake
-            
-            # Get all takes and analyze group structure
-            all_takes = []
-            for i in range(len(scene.Takes)):
-                take = scene.Takes[i]
-                take_name = strip_prefix(take.Name)
-                all_takes.append((take, take_name, i))
-            
-            # Find the source group and its contents
-            source_group = None
-            source_group_contents = []
-            
-            groups = self._analyze_take_groups(all_takes)
-            for group in groups:
-                if group['header'] and group['header'][1] == source_group_name:
-                    source_group = group
-                    source_group_contents = [group['header']] + group['members']
-                    break
-            
-            if not source_group:
-                # Fallback to regular move if group not found
-                self.reorder_takes_by_name(source_group_name, target_take_name)
-                return
-            
-            # Find target position
-            target_position = -1
-            for take, take_name, position in all_takes:
-                if take_name == target_take_name:
-                    target_position = position
-                    break
-            
-            if target_position == -1:
-                return
-            
-            # Check if moving the group would leave ungrouped takes that need auto-grouping
-            orphaned_takes = self._find_orphaned_takes_after_group_move(groups, source_group, target_position)
-            
-            # Get the takes list for manipulation
-            first_take = scene.Takes[0]
-            takes_list = first_take.GetDst(1)
-            
-            if not takes_list:
-                return
-            
-            # Step 1: Create auto-group for orphaned takes if needed
-            auto_group_take = None
-            if orphaned_takes:
-                auto_group_take = self._create_auto_group(orphaned_takes)
-                if auto_group_take:
-                    # Refresh our takes list since we added a new take
-                    all_takes = []
-                    for i in range(len(scene.Takes)):
-                        take = scene.Takes[i]
-                        take_name = strip_prefix(take.Name)
-                        all_takes.append((take, take_name, i))
-                    
-                    # Find the new target position (might have shifted due to auto-group creation)
-                    for take, take_name, position in all_takes:
-                        if take_name == target_take_name:
-                            target_position = position
-                            break
-            
-            # Step 2: Move the entire group to new position using individual moves
-            self._move_group_sequentially(takes_list, source_group_contents, target_position)
-            
-            # Update the scene
-            scene.Evaluate()
-            
-            # Restore the current take
-            if current_take:
-                system.CurrentTake = current_take
-            
-        except Exception as e:
-            print(f"ERROR in move_group_with_contents: {e}")
-            QMessageBox.warning(self, "Error", f"Failed to move group: {e}")
-    
-    def _find_orphaned_takes_after_group_move(self, groups, moving_group, target_position):
-        """Find takes that would become orphaned after moving a group."""
-        orphaned = []
-        
-        # Find the index of the moving group
-        moving_group_index = -1
-        for i, group in enumerate(groups):
-            if group == moving_group:
-                moving_group_index = i
-                break
-        
-        if moving_group_index == -1:
-            return orphaned
-        
-        # Find where the group is moving to
-        target_group_index = -1
-        for i, group in enumerate(groups):
-            if group['header']:
-                if group['header'][2] <= target_position <= group['header'][2] + len(group['members']):
-                    target_group_index = i
-                    break
-            else:
-                # Ungrouped section
-                for member in group['members']:
-                    if member[2] == target_position:
-                        target_group_index = i
-                        break
-                if target_group_index != -1:
-                    break
-        
-        # Determine what gets orphaned based on movement direction
-        if target_group_index > moving_group_index:
-            # Moving down - check for ungrouped takes immediately after the moving group
-            if moving_group_index + 1 < len(groups):
-                next_group = groups[moving_group_index + 1]
-                if next_group['header'] is None:  # Ungrouped takes
-                    orphaned = next_group['members']
-        else:
-            # Moving up - check for ungrouped takes at the target location
-            if target_group_index != -1 and target_group_index < len(groups):
-                target_group = groups[target_group_index]
-                if target_group['header'] is None:  # Target is ungrouped takes
-                    orphaned = target_group['members']
-        
-        return orphaned
-    
-    def _create_auto_group(self, orphaned_takes):
-        """Create an auto-group for orphaned takes."""
-        try:
-            system = FBSystem()
-            
-            # Generate a unique group name
-            group_counter = 1
-            while True:
-                group_name = f"== Group{group_counter:02d} =="
-                # Check if this name already exists
-                name_exists = False
-                for i in range(len(system.Scene.Takes)):
-                    take = system.Scene.Takes[i]
-                    if strip_prefix(take.Name) == strip_prefix(group_name):
-                        name_exists = True
-                        break
-                
-                if not name_exists:
-                    break
-                group_counter += 1
-            
-            # Create the group take and insert it before the first orphaned take
-            if orphaned_takes:
-                first_orphaned_pos = orphaned_takes[0][2]  # Position of first orphaned take
-                
-                # Create the group take
-                auto_group_take = FBTake(group_name)
-                system.Scene.Takes.append(auto_group_take)
-                
-                # Move it to the correct position (before first orphaned take)
-                first_take = system.Scene.Takes[0]
-                takes_list = first_take.GetDst(1)
-                
-                if takes_list:
-                    # Find the auto group in the takes list (it's at the end)
-                    auto_group_src_id = -1
-                    for i in range(takes_list.GetSrcCount()):
-                        src = takes_list.GetSrc(i)
-                        if src == auto_group_take:
-                            auto_group_src_id = i
-                            break
-                    
-                    if auto_group_src_id >= 0:
-                        takes_list.MoveSrcAt(auto_group_src_id, first_orphaned_pos)
-                        system.Scene.Evaluate()
-                
-                return auto_group_take
-                
-        except Exception as e:
-            print(f"ERROR creating auto-group: {e}")
-            
-        return None
-    
-    def _move_group_sequentially(self, takes_list, group_contents, target_position):
-        """Move group contents one by one to the target position."""
-        try:
-            # Sort group contents by their original position
-            group_contents.sort(key=lambda x: x[2])
-            
-            # Move each take in the group, starting from the header
-            for i, (take_obj, take_name, old_pos) in enumerate(group_contents):
-                # Find current source ID in takes list
-                src_id = -1
-                for j in range(takes_list.GetSrcCount()):
-                    src = takes_list.GetSrc(j)
-                    if src == take_obj:
-                        src_id = j
-                        break
-                
-                if src_id >= 0:
-                    # Calculate target ID for this specific take
-                    # The first take (group header) goes to target_position
-                    # Subsequent takes go immediately after
-                    final_target_id = target_position + i
-                    
-                    # Ensure we don't exceed bounds
-                    max_pos = takes_list.GetSrcCount() - 1
-                    if final_target_id > max_pos:
-                        final_target_id = max_pos
-                    
-                    # Only move if the position is different
-                    if src_id != final_target_id:
-                        takes_list.MoveSrcAt(src_id, final_target_id)
-                        
-        except Exception as e:
-            print(f"ERROR in _move_group_sequentially: {e}")
-    
     def _sort_takes_alphabetically(self):
         """Sort takes alphabetically in ascending order (A to Z). If multiple takes are selected, sort only those. If only one take is selected, sort all takes."""
         system = FBSystem()
@@ -1317,11 +1126,20 @@ class TakeHandlerWindow(QMainWindow):
     def _get_take_data(self, take_name):
         """Using the stripped name as key."""
         if take_name not in self.take_data:
-            self.take_data[take_name] = {
-                'tag': '',
-                'color': QColor(200, 200, 200),
-                'favorite': False
-            }
+            # For group takes, assign auto-color, for regular takes use default gray
+            if is_group_take(take_name):
+                self.take_data[take_name] = {
+                    'tag': '',
+                    'color': self._get_next_group_color(),
+                    'favorite': False,
+                    'is_group': True
+                }
+            else:
+                self.take_data[take_name] = {
+                    'tag': '',
+                    'color': QColor(200, 200, 200),
+                    'favorite': False
+                }
         return self.take_data[take_name]
     
     def _show_context_menu(self, position):
@@ -1657,8 +1475,11 @@ class TakeHandlerWindow(QMainWindow):
                         takes_list.MoveSrcAt(group_src_id, earliest_pos)
                         scene.Evaluate()
             
-            # Mark this as a group in our data
-            self.take_data[group_name] = {'is_group': True}
+            # Mark this as a group in our data and assign a color
+            self.take_data[group_name] = {
+                'is_group': True,
+                'color': self._get_next_group_color()
+            }
             
             # Group the selected takes under this group
             for take_name in selected_take_names:
@@ -2095,10 +1916,19 @@ class TakeHandlerWindow(QMainWindow):
             takes_list = first_take.GetDst(1)  # This is the Takes List folder
             
             # Reorder it to be after the selected take
-            if takes_list and new_index != selected_take_index + 1:
-                src_id = new_index
-                dst_id = selected_take_index + 1
-                takes_list.MoveSrcAt(src_id, dst_id)
+            if takes_list:
+                # Find the new take in the takes list (it's at the end)
+                new_take_src_id = -1
+                for i in range(takes_list.GetSrcCount()):
+                    src = takes_list.GetSrc(i)
+                    if src == new_take:
+                        new_take_src_id = i
+                        break
+                
+                if new_take_src_id >= 0:
+                    # Place it right after the selected take
+                    target_position = selected_take_index + 1
+                    takes_list.MoveSrcAt(new_take_src_id, target_position)
                 
             # Update the scene
             system.Scene.Evaluate()
@@ -2197,18 +2027,27 @@ class TakeHandlerWindow(QMainWindow):
                 
         if take_to_rename:
             try:
-                # Preserve group prefix if needed
-                is_group = is_group_take(take_name)
+                # Use the exact name as provided by user - no automatic prefixes
                 new_name_with_prefix = new_name.strip()
-                if is_group:
-                    if take_name.startswith('=='):
-                        new_name_with_prefix = f"== {new_name.strip()}"
-                    elif take_name.startswith('--'):
-                        new_name_with_prefix = f"-- {new_name.strip()}"
+                
+                # Check if this is becoming a group take
+                is_becoming_group = is_group_take(new_name_with_prefix)
+                was_group = is_group_take(take_name)
                 
                 if take_name in self.take_data:
-                    self.take_data[new_name_with_prefix] = self.take_data[take_name]
+                    # Copy existing data
+                    self.take_data[new_name_with_prefix] = self.take_data[take_name].copy()
                     del self.take_data[take_name]
+                else:
+                    # Create new data entry
+                    self.take_data[new_name_with_prefix] = {}
+                
+                # If becoming a group take, ensure it has group properties
+                if is_becoming_group and not was_group:
+                    self.take_data[new_name_with_prefix]['is_group'] = True
+                    # Always assign color for new groups
+                    assigned_color = self._get_next_group_color()
+                    self.take_data[new_name_with_prefix]['color'] = assigned_color
                 
                 take_to_rename.Name = new_name_with_prefix
                 self._save_config()
@@ -2358,16 +2197,46 @@ class TakeHandlerWindow(QMainWindow):
         # Check if the click was in the toggle area
         mouse_pos = self.take_list.mapFromGlobal(QCursor.pos())
         if toggle_rect.contains(mouse_pos):
-            # Toggle the expanded state
-            group_name = item.take_name
-            self.expanded_groups[group_name] = not self.expanded_groups.get(group_name, True)
+            # Check if Shift or Ctrl is pressed for all-groups toggle
+            modifiers = QApplication.keyboardModifiers()
+            shift_pressed = modifiers & Qt.ShiftModifier
+            ctrl_pressed = modifiers & Qt.ControlModifier
+            all_groups_toggle = shift_pressed or ctrl_pressed
             
-            # Update the visibility of child items
-            for i in range(self.take_list.count()):
-                child_item = self.take_list.item(i)
-                if child_item and child_item.parent_group == group_name:
-                    child_item.visible = self.expanded_groups[group_name]
-                    child_item.setHidden(not child_item.visible)
+            group_name = item.take_name
+            
+            if all_groups_toggle:
+                # Shift+click: toggle ALL groups based on this group's current state
+                current_state = self.expanded_groups.get(group_name, True)
+                new_state = not current_state
+                
+                # Apply to all groups
+                for i in range(self.take_list.count()):
+                    list_item = self.take_list.item(i)
+                    if list_item and getattr(list_item, 'is_group', False):
+                        group_item_name = list_item.take_name
+                        self.expanded_groups[group_item_name] = new_state
+                        
+                        # Update visibility of child items for this group
+                        for j in range(self.take_list.count()):
+                            child_item = self.take_list.item(j)
+                            if child_item and getattr(child_item, 'parent_group', None) == group_item_name:
+                                child_item.visible = new_state
+                                child_item.setHidden(not new_state)
+            else:
+                # Normal click: toggle just this group
+                self.expanded_groups[group_name] = not self.expanded_groups.get(group_name, True)
+                
+                # Update the visibility of child items for this group only
+                for i in range(self.take_list.count()):
+                    child_item = self.take_list.item(i)
+                    if child_item and getattr(child_item, 'parent_group', None) == group_name:
+                        child_item.visible = self.expanded_groups[group_name]
+                        child_item.setHidden(not child_item.visible)
+            
+            # Deselect everything after all-groups toggle to avoid selection artifacts
+            if all_groups_toggle:
+                self.take_list.clearSelection()
             
             # Save the expanded state
             self._save_config()
@@ -2500,11 +2369,11 @@ class TakeListDelegate(QStyledItemDelegate):
             painter.setPen(option.palette.highlightedText().color())
         else:
             if is_group:
-                # Use tag color for group take text if it has a tag, otherwise use dark gray
-                if has_tag and color:
+                # Use tag color if available, otherwise use auto-assigned group color, fallback to dark gray
+                if color:  # Color can be from tag or auto-assigned
                     painter.setPen(color)
                 else:
-                    painter.setPen(QColor(80, 80, 80))  # Dark gray for group takes without tags
+                    painter.setPen(QColor(80, 80, 80))  # Dark gray fallback
             else:
                 painter.setPen(option.palette.text().color())
         
