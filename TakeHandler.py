@@ -7,7 +7,7 @@ from pyfbsdk_additions import *
 import PySide6
 from PySide6.QtWidgets import (QApplication, QMainWindow, QListWidget, QListWidgetItem, 
                                QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QMenu, 
-                               QDialog, QLabel, QLineEdit, QInputDialog,
+                               QDialog, QLabel, QLineEdit, QInputDialog, QTextEdit,
                                QMessageBox, QStyledItemDelegate, QStyle, QSizePolicy,
                                QSizeGrip)
 from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QPolygon, QCursor, QFont
@@ -183,9 +183,77 @@ class TagDialog(QDialog):
         self.tag = self.tag_edit.text()
         return self.tag, self.color
 
+class NotesDialog(QDialog):
+    """Dialog for creating/editing take notes."""
+    def __init__(self, take_name, current_note="", parent=None):
+        super(NotesDialog, self).__init__(parent)
+        self.setWindowTitle(f"Note for {take_name}")
+        self.setFixedSize(400, 200)
+        self.setModal(True)
+        
+        # Set dark theme
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+                color: white;
+            }
+            QLabel {
+                color: white;
+            }
+            QTextEdit {
+                background-color: #3C3C50;
+                color: white;
+                border: 1px solid #3A539B;
+                padding: 5px;
+            }
+            QPushButton {
+                background-color: #3A539B;
+                color: white;
+                border: none;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #4A649B;
+            }
+            QPushButton:pressed {
+                background-color: #2A439B;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        
+        # Note text area
+        layout.addWidget(QLabel("Note text:"))
+        self.note_edit = QTextEdit()
+        self.note_edit.setPlainText(current_note)
+        layout.addWidget(self.note_edit)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        ok_button = QPushButton("Create" if not current_note else "Update")
+        ok_button.clicked.connect(self.accept)
+        ok_button.setDefault(True)
+        button_layout.addWidget(ok_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Focus on text area
+        self.note_edit.setFocus()
+    
+    def get_values(self):
+        """Return the note text."""
+        return self.note_edit.toPlainText().strip()
+
 class TakeListItem(QListWidgetItem):
     """Custom list item for takes."""
-    def __init__(self, take_name, is_current=False, tag="", color=None, is_favorite=False, parent_group=None, visible=True):
+    def __init__(self, take_name, is_current=False, tag="", color=None, is_favorite=False, parent_group=None, visible=True, note="", note_color=None):
         super(TakeListItem, self).__init__()
         self.take_name = take_name  # This is the stripped (original) name.
         self.tag = tag
@@ -194,6 +262,8 @@ class TakeListItem(QListWidgetItem):
         self.is_group = is_group_take(take_name)
         self.parent_group = parent_group  # Name of the parent group take
         self.visible = visible  # Whether this take should be visible based on group collapse
+        self.note = note
+        self.note_color = note_color or QColor(255, 255, 255)
         self.update_display(is_current)
     
     def update_display(self, is_current=False):
@@ -206,6 +276,16 @@ class TakeListItem(QListWidgetItem):
             self.setData(Qt.UserRole + 1, True)
         self.setData(Qt.UserRole + 2, bool(self.tag))
         self.setData(Qt.UserRole + 3, self.is_group)  # Store group status for delegate
+        self.setData(Qt.UserRole + 4, bool(self.note))  # Has note
+        self.setData(Qt.UserRole + 5, self.note_color)  # Note color
+        self.setData(Qt.UserRole + 6, self.note)  # Note text for tooltip
+        
+        # Set tooltip if there's a note
+        if self.note:
+            self.setToolTip(self.note)
+        else:
+            self.setToolTip("")
+            
         self.setHidden(not self.visible)  # Hide/show based on group collapse state
 
 class DraggableListWidget(QListWidget):
@@ -545,9 +625,12 @@ class TakeHandlerWindow(QMainWindow):
                 with open(self.config_path, 'r') as f:
                     saved_data = json.load(f)
                     for take_name, data in saved_data.items():
-                        if 'color' in data:
+                        if 'color' in data and isinstance(data['color'], dict):
                             color_dict = data['color']
                             data['color'] = QColor(color_dict['r'], color_dict['g'], color_dict['b'])
+                        if 'note_color' in data and isinstance(data['note_color'], dict):
+                            note_color_dict = data['note_color']
+                            data['note_color'] = QColor(note_color_dict['r'], note_color_dict['g'], note_color_dict['b'])
                     self.take_data = saved_data
                     
                     # Load expanded state if available
@@ -568,6 +651,12 @@ class TakeHandlerWindow(QMainWindow):
                     'r': data['color'].red(),
                     'g': data['color'].green(),
                     'b': data['color'].blue()
+                }
+            if 'note_color' in data and isinstance(data['note_color'], QColor):
+                save_data[take_name]['note_color'] = {
+                    'r': data['note_color'].red(),
+                    'g': data['note_color'].green(),
+                    'b': data['note_color'].blue()
                 }
                 
         # Save expanded state
@@ -1246,6 +1335,17 @@ class TakeHandlerWindow(QMainWindow):
             favorite_action = menu.addAction("Remove from Favorites")
         else:
             favorite_action = menu.addAction("Add to Favorites")
+        
+        # Notes menu
+        menu.addSeparator()
+        if take_data.get('note', ''):
+            edit_note_action = menu.addAction("Edit Note")
+            delete_note_action = menu.addAction("Delete Note")
+        else:
+            create_note_action = menu.addAction("Create Note")
+            edit_note_action = None
+            delete_note_action = None
+        
         menu.addSeparator()
         duplicate_action = menu.addAction("Duplicate Take")
         add_take_below_action = menu.addAction("Add new Take below")
@@ -1287,6 +1387,12 @@ class TakeHandlerWindow(QMainWindow):
             take_data['favorite'] = not take_data.get('favorite', False)
             self._save_config()
             self.update_take_list()
+        elif action and hasattr(action, 'text') and action.text() == "Create Note":
+            self._create_note(take_name)
+        elif action and hasattr(action, 'text') and action.text() == "Edit Note":
+            self._edit_note(take_name)
+        elif action and hasattr(action, 'text') and action.text() == "Delete Note":
+            self._delete_note(take_name)
         elif action == duplicate_action:
             self._duplicate_take(take_name)
         elif action == add_take_below_action:
@@ -1778,6 +1884,42 @@ class TakeHandlerWindow(QMainWindow):
             self._save_config()
             self.update_take_list()
     
+    def _create_note(self, take_name):
+        """Create a new note for a take."""
+        dialog = NotesDialog(take_name, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            note_text = dialog.get_values()
+            if note_text:  # Only save if there's actual text
+                take_data = self._get_take_data(take_name)
+                take_data['note'] = note_text
+                self._save_config()
+                self.update_take_list()
+    
+    def _edit_note(self, take_name):
+        """Edit an existing note for a take."""
+        take_data = self._get_take_data(take_name)
+        current_note = take_data.get('note', '')
+        
+        dialog = NotesDialog(take_name, current_note, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            note_text = dialog.get_values()
+            if note_text:  # Only save if there's actual text
+                take_data['note'] = note_text
+            else:
+                # Remove note if text is empty
+                if 'note' in take_data:
+                    del take_data['note']
+            self._save_config()
+            self.update_take_list()
+    
+    def _delete_note(self, take_name):
+        """Delete a note from a take."""
+        take_data = self._get_take_data(take_name)
+        if 'note' in take_data:
+            del take_data['note']
+        self._save_config()
+        self.update_take_list()
+    
     def _add_take_at_end(self):
         """Add a new take at the end of the takes list, with group handling"""
         system = FBSystem()
@@ -2162,7 +2304,9 @@ class TakeHandlerWindow(QMainWindow):
                 color=take_data.get('color'),
                 is_favorite=take_data.get('favorite', False),
                 parent_group=current_group if take_name_clean != current_group else None,
-                visible=visible
+                visible=visible,
+                note=take_data.get('note', ''),
+                note_color=take_data.get('note_color', QColor(255, 255, 255))
             )
             
             all_takes.append(item)
@@ -2297,6 +2441,8 @@ class TakeListDelegate(QStyledItemDelegate):
         is_favorite = index.data(Qt.UserRole + 1)
         has_tag = index.data(Qt.UserRole + 2)
         is_group = index.data(Qt.UserRole + 3)
+        has_note = index.data(Qt.UserRole + 4)
+        note_color = index.data(Qt.UserRole + 5)
         
         # Get the take item to check if it's the current take
         item = self.window.take_list.item(index.row())
@@ -2379,10 +2525,20 @@ class TakeListDelegate(QStyledItemDelegate):
         
         painter.drawText(text_rect, Qt.AlignVCenter, text)
         
-        # Draw star on top of everything else
+        # Draw note icon and star on top of everything else
+        right_offset = 0
+        
+        # Draw note icon first (rightmost)
+        if has_note:
+            painter.setPen(QColor(255, 255, 255))  # White note icon
+            note_rect = QRect(option.rect.right() - 15 - right_offset, option.rect.top(), 15, option.rect.height())
+            painter.drawText(note_rect, Qt.AlignCenter, "📝")  # Note emoji
+            right_offset += 15
+        
+        # Draw star (next to note if it exists)
         if is_favorite:
             painter.setPen(QColor(255, 215, 0))
-            star_rect = QRect(option.rect.right() - 15, option.rect.top(), 15, option.rect.height())
+            star_rect = QRect(option.rect.right() - 15 - right_offset, option.rect.top(), 15, option.rect.height())
             painter.drawText(star_rect, Qt.AlignCenter, "★")
         
         painter.restore()
