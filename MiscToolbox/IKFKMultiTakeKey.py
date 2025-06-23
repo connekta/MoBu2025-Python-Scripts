@@ -78,14 +78,19 @@ def _process_ik_blend_property(property_obj, target_value, mode, take):
     keys_count = len(fcurve.Keys)
     has_keys = keys_count > 0
     
-    if mode == "Add" and has_keys:
+    if mode == "Remove":
+        # Remove all keys from this property
+        if has_keys:
+            fcurve.EditClear()
+        return
+    elif mode == "Add" and has_keys:
         # Skip if keys exist and mode is Add
         return
     elif mode == "Replace" and has_keys:
         # Remove all existing keys
         fcurve.EditClear()
     
-    # Add new key at first frame of take
+    # Add new key at first frame of take (only for Replace and Add modes)
     start_time = take.LocalTimeSpan.GetStart()
     
     try:
@@ -182,22 +187,41 @@ class IKFKConfirmationDialog(QDialog):
         mode_layout.addLayout(add_layout)
         
         add_desc = QLabel("Only add key if no IK Reach keys exist (skip takes that already have keys)")
-        add_desc.setStyleSheet("color: #666; font-size: 10px; margin-left: 20px;")
+        add_desc.setStyleSheet("color: #666; font-size: 10px; margin-left: 20px; margin-bottom: 10px;")
         mode_layout.addWidget(add_desc)
+        
+        # Remove option with radio button
+        remove_layout = QHBoxLayout()
+        self.remove_radio = QRadioButton("Remove")
+        self.remove_radio.setStyleSheet("font-weight: bold;")
+        remove_layout.addWidget(self.remove_radio)
+        remove_layout.addStretch()
+        mode_layout.addLayout(remove_layout)
+        
+        remove_desc = QLabel("Remove all IK Reach keys from the selected effectors (ignores current values)")
+        remove_desc.setStyleSheet("color: #666; font-size: 10px; margin-left: 20px;")
+        mode_layout.addWidget(remove_desc)
         
         layout.addWidget(mode_group)
         
         # Buttons
         button_layout = QHBoxLayout()
         
+        # Apply to Selected Takes button (left side)
+        self.apply_selected_button = QPushButton("Apply to Selected Takes")
+        self.apply_selected_button.clicked.connect(self.apply_to_selected_takes)
+        button_layout.addWidget(self.apply_selected_button)
+        
         button_layout.addStretch()
         
+        # Apply to All Takes button (right side)
         self.apply_button = QPushButton("Apply to All Takes")
         self.apply_button.clicked.connect(self.apply_to_takes)
         button_layout.addWidget(self.apply_button)
         
-        # Update button state based on initial selection
+        # Update button states based on initial selection
         self.update_apply_button_state()
+        self.update_selected_takes_button()
         
         layout.addLayout(button_layout)
         
@@ -205,6 +229,11 @@ class IKFKConfirmationDialog(QDialog):
         self.selection_timer = QTimer()
         self.selection_timer.timeout.connect(self.check_selection_changes)
         self.selection_timer.start(500)  # Check every 500ms for more responsive updates
+        
+        # Set up timer for Take Handler monitoring
+        self.take_handler_timer = QTimer()
+        self.take_handler_timer.timeout.connect(self.update_selected_takes_button)
+        self.take_handler_timer.start(1000)  # Check every second for Take Handler
     
     def update_apply_button_state(self):
         """Update the apply button state and styling based on selection"""
@@ -346,6 +375,7 @@ class IKFKConfirmationDialog(QDialog):
             self.current_effector_data = new_effector_data
             self.update_effector_display()
             self.update_apply_button_state()
+            self.update_selected_takes_button()
             
         except Exception as e:
             pass  # Ignore errors during refresh
@@ -359,7 +389,17 @@ class IKFKConfirmationDialog(QDialog):
         # Refresh selection one more time to ensure latest values
         self.refresh_selection()
         
-        mode = "Replace" if self.replace_radio.isChecked() else "Add"
+        # Ensure there are keys on the selected effectors in the current take
+        # This prevents issues when effectors have no existing keys (skip for Remove mode)
+        if self.replace_radio.isChecked():
+            mode = "Replace"
+            self._ensure_initial_keys()
+        elif self.add_radio.isChecked():
+            mode = "Add"
+            self._ensure_initial_keys()
+        else:
+            mode = "Remove"
+            # No need to ensure keys for Remove mode
         
         # Process all takes
         system = FBSystem()
@@ -435,10 +475,270 @@ class IKFKConfirmationDialog(QDialog):
                 system.CurrentTake = current_take
             FBMessageBox("Error", f"Error processing takes: {str(e)}", "OK")
     
+    def _ensure_initial_keys(self):
+        """Ensure there are keys on the selected effectors in the current take"""
+        if not MOBU_AVAILABLE or not self.current_effector_data:
+            return
+        
+        system = FBSystem()
+        current_take = system.CurrentTake
+        
+        if not current_take:
+            return
+        
+        try:
+            # Get the current time
+            current_time = system.LocalTime
+            
+            # Process each effector to ensure it has keys
+            for effector in self.current_effector_data:
+                # Process IK Blend T property
+                if effector['ik_blend_t_prop']:
+                    self._ensure_property_has_key(effector['ik_blend_t_prop'], current_time)
+                
+                # Process IK Blend R property
+                if effector['ik_blend_r_prop']:
+                    self._ensure_property_has_key(effector['ik_blend_r_prop'], current_time)
+            
+            # Force scene evaluation
+            system.Scene.Evaluate()
+            
+        except Exception as e:
+            pass  # Ignore errors during key creation
+    
+    def _ensure_property_has_key(self, property_obj, time):
+        """Ensure a property has at least one key"""
+        if not property_obj:
+            return
+        
+        try:
+            # Check if property already has animation
+            anim_node = property_obj.GetAnimationNode()
+            
+            has_existing_keys = False
+            if anim_node and anim_node.FCurve:
+                existing_keys = len(anim_node.FCurve.Keys)
+                has_existing_keys = existing_keys > 0
+            
+            if not has_existing_keys:
+                # Use the Key() method to create a key directly on the property
+                # This will automatically create animation nodes and FCurves as needed
+                property_obj.Key()
+        
+        except Exception as e:
+            pass  # Ignore errors during key creation
+    
+    def get_selected_takes_from_take_handler(self):
+        """Get selected takes from Take Handler if it's open"""
+        try:
+            # Look for Take Handler window in Qt application
+            app = QApplication.instance()
+            if not app:
+                return []
+            
+            selected_takes = []
+            
+            # Search through all top-level widgets to find Take Handler
+            for widget in app.topLevelWidgets():
+                if (hasattr(widget, 'windowTitle') and 
+                    'Take Handler' in widget.windowTitle() and 
+                    widget.isVisible()):
+                    
+                    # Found Take Handler window, try to get selected items
+                    if hasattr(widget, 'take_list'):
+                        take_list = widget.take_list
+                        if hasattr(take_list, 'selectedItems'):
+                            selected_items = take_list.selectedItems()
+                            for item in selected_items:
+                                if hasattr(item, 'text'):
+                                    take_name = item.text()
+                                    # Get the actual take object from MotionBuilder
+                                    system = FBSystem()
+                                    for take in system.Scene.Takes:
+                                        if take.Name == take_name:
+                                            selected_takes.append(take)
+                                            break
+                    break
+            
+            return selected_takes
+        except:
+            return []
+    
+    def is_take_handler_open(self):
+        """Check if Take Handler window is open"""
+        try:
+            app = QApplication.instance()
+            if not app:
+                return False
+            
+            for widget in app.topLevelWidgets():
+                if (hasattr(widget, 'windowTitle') and 
+                    'Take Handler' in widget.windowTitle() and 
+                    widget.isVisible()):
+                    return True
+            return False
+        except:
+            return False
+    
+    def update_selected_takes_button(self):
+        """Update the selected takes button visibility and text"""
+        if not self.is_take_handler_open():
+            self.apply_selected_button.setVisible(False)
+            return
+        
+        selected_takes = self.get_selected_takes_from_take_handler()
+        take_count = len(selected_takes)
+        
+        if take_count > 0:
+            self.apply_selected_button.setVisible(True)
+            self.apply_selected_button.setText(f"Apply to {take_count} Take{'s' if take_count != 1 else ''}")
+            
+            # Enable/disable based on effector selection
+            has_effectors = bool(self.current_effector_data)
+            self.apply_selected_button.setEnabled(has_effectors)
+            
+            if has_effectors:
+                # Enabled state - green button
+                self.apply_selected_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #4CAF50;
+                        color: white;
+                        font-weight: bold;
+                        padding: 8px 16px;
+                        border: none;
+                        border-radius: 4px;
+                    }
+                    QPushButton:hover {
+                        background-color: #45a049;
+                    }
+                """)
+            else:
+                # Disabled state - grayed out button
+                self.apply_selected_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #808080;
+                        color: #cccccc;
+                        font-weight: bold;
+                        padding: 8px 16px;
+                        border: none;
+                        border-radius: 4px;
+                    }
+                    QPushButton:disabled {
+                        background-color: #606060;
+                        color: #999999;
+                    }
+                """)
+        else:
+            self.apply_selected_button.setVisible(False)
+    
+    def apply_to_selected_takes(self):
+        """Apply the IK/FK values to selected takes from Take Handler"""
+        if not self.current_effector_data:
+            return
+        
+        selected_takes = self.get_selected_takes_from_take_handler()
+        if not selected_takes:
+            FBMessageBox("No Takes Selected", "Please select takes in the Take Handler first.", "OK")
+            return
+        
+        # Refresh selection one more time to ensure latest values
+        self.refresh_selection()
+        
+        # Ensure there are keys on the selected effectors in the current take
+        # (skip for Remove mode)
+        if self.replace_radio.isChecked():
+            mode = "Replace"
+            self._ensure_initial_keys()
+        elif self.add_radio.isChecked():
+            mode = "Add"
+            self._ensure_initial_keys()
+        else:
+            mode = "Remove"
+            # No need to ensure keys for Remove mode
+        
+        # Process only selected takes
+        system = FBSystem()
+        current_take = system.CurrentTake
+        processed_takes = 0
+        
+        try:
+            for take in selected_takes:
+                # Switch to this take
+                system.CurrentTake = take
+                
+                # Get the BaseAnimation layer
+                base_layer = None
+                for i in range(take.GetLayerCount()):
+                    layer = take.GetLayer(i)
+                    if layer.Name == "BaseAnimation":
+                        base_layer = layer
+                        break
+                
+                if not base_layer:
+                    continue
+                
+                # Process each effector
+                for effector in self.current_effector_data:
+                    # Process IK Blend T
+                    if effector['ik_blend_t_prop']:
+                        _process_ik_blend_property(
+                            effector['ik_blend_t_prop'], 
+                            effector['ik_blend_t'], 
+                            mode, 
+                            take
+                        )
+                    
+                    # Process IK Blend R
+                    if effector['ik_blend_r_prop']:
+                        _process_ik_blend_property(
+                            effector['ik_blend_r_prop'], 
+                            effector['ik_blend_r'], 
+                            mode, 
+                            take
+                        )
+                
+                processed_takes += 1
+            
+            # Restore original take
+            if current_take:
+                system.CurrentTake = current_take
+            
+            # Show completion message with detailed values
+            effector_details = []
+            for effector in self.current_effector_data:
+                detail = f"• {effector['name']}"
+                if effector['ik_blend_t'] is not None:
+                    detail += f" (IK Reach Translation: {effector['ik_blend_t']:.1f})"
+                if effector['ik_blend_r'] is not None:
+                    detail += f" (IK Reach Rotation: {effector['ik_blend_r']:.1f})"
+                effector_details.append(detail)
+            
+            take_names = [take.Name for take in selected_takes]
+            
+            FBMessageBox(
+                "IK/FK Selected Takes Complete", 
+                f"Successfully processed {processed_takes} selected takes.\n"
+                f"Mode: {mode}\n\n"
+                f"Takes processed:\n" + "\n".join([f"• {name}" for name in take_names]) + "\n\n"
+                f"Values applied:\n" + "\n".join(effector_details), 
+                "OK"
+            )
+            
+            # Close the dialog after showing completion message
+            self.close()
+            
+        except Exception as e:
+            # Restore original take on error
+            if current_take:
+                system.CurrentTake = current_take
+            FBMessageBox("Error", f"Error processing selected takes: {str(e)}", "OK")
+    
     def closeEvent(self, event):
-        """Clean up timer when dialog is closed"""
+        """Clean up timers when dialog is closed"""
         if hasattr(self, 'selection_timer'):
             self.selection_timer.stop()
+        if hasattr(self, 'take_handler_timer'):
+            self.take_handler_timer.stop()
         super().closeEvent(event)
 
 
