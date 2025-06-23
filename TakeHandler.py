@@ -1277,6 +1277,22 @@ class TakeHandlerWindow(QMainWindow):
             duplicate_action = menu.addAction(f"Duplicate {len(selected_items)} Takes")
             rename_action = menu.addAction(f"Rename {len(selected_items)} Takes")
             menu.addSeparator()
+            
+            # Check if any selected takes are unfinished
+            unfinished_takes = [item for item in selected_items if item.take_name.endswith(" [X]")]
+            finished_takes = [item for item in selected_items if not item.take_name.endswith(" [X]")]
+            
+            if unfinished_takes and finished_takes:
+                mark_unfinished_action = menu.addAction(f"Mark All {len(selected_items)} as Unfinished")
+                unmark_unfinished_action = menu.addAction(f"Remove Unfinished Mark from All")
+            elif unfinished_takes:
+                unmark_unfinished_action = menu.addAction(f"Remove Unfinished Mark from {len(selected_items)} Takes")
+                mark_unfinished_action = None
+            else:
+                mark_unfinished_action = menu.addAction(f"Mark {len(selected_items)} as Unfinished")
+                unmark_unfinished_action = None
+            
+            menu.addSeparator()
             delete_action = menu.addAction(f"Delete {len(selected_items)} Takes")
             
             action = menu.exec(self.take_list.mapToGlobal(position))
@@ -1300,6 +1316,10 @@ class TakeHandlerWindow(QMainWindow):
                 self._duplicate_takes(selected_items)
             elif action == rename_action:
                 self._rename_takes(selected_items)
+            elif action == mark_unfinished_action:
+                self._toggle_unfinished_marker_for_multiple(selected_items, mark_as_unfinished=True)
+            elif action == unmark_unfinished_action:
+                self._toggle_unfinished_marker_for_multiple(selected_items, mark_as_unfinished=False)
             elif action == delete_action:
                 self._delete_takes(selected_items)
                 
@@ -1351,6 +1371,14 @@ class TakeHandlerWindow(QMainWindow):
         add_take_below_action = menu.addAction("Add new Take below")
         rename_action = menu.addAction("Rename Take")
         menu.addSeparator()
+        
+        # Mark as Unfinished option (just before delete)
+        if take_name.endswith(" [X]"):
+            mark_unfinished_action = menu.addAction("Remove Unfinished Mark")
+        else:
+            mark_unfinished_action = menu.addAction("Mark as Unfinished")
+        
+        menu.addSeparator()
         delete_action = menu.addAction("Delete Take")
         action = menu.exec(self.take_list.mapToGlobal(position))
         if action == add_new_tag_action:
@@ -1400,6 +1428,8 @@ class TakeHandlerWindow(QMainWindow):
         elif action == rename_action:
             # Store the take name instead of the item reference which might be deleted
             self._start_inline_rename(take_name)
+        elif action == mark_unfinished_action:
+            self._toggle_unfinished_marker(take_name)
         elif action == delete_action:
             self._delete_take(take_name)
     
@@ -1804,6 +1834,55 @@ class TakeHandlerWindow(QMainWindow):
                     del self.take_data[take_name]
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to delete take {take_name}: {e}")
+        
+        self._save_config()
+        self.update_take_list()
+    
+    def _toggle_unfinished_marker_for_multiple(self, items, mark_as_unfinished=True):
+        """Toggle the [X] unfinished marker for multiple takes."""
+        system = FBSystem()
+        
+        for item in items:
+            take_name = item.take_name
+            target_take = None
+            
+            # Find the take
+            for i in range(len(system.Scene.Takes)):
+                take = system.Scene.Takes[i]
+                if strip_prefix(take.Name) == take_name:
+                    target_take = take
+                    break
+            
+            if not target_take:
+                continue
+                
+            try:
+                # Determine new name based on action requested
+                if mark_as_unfinished:
+                    # Add unfinished marker if not already present
+                    if not take_name.endswith(" [X]"):
+                        new_name = f"{take_name} [X]"
+                    else:
+                        new_name = take_name  # Already marked, no change
+                else:
+                    # Remove unfinished marker if present
+                    if take_name.endswith(" [X]"):
+                        new_name = take_name[:-4]  # Remove " [X]"
+                    else:
+                        new_name = take_name  # Not marked, no change
+                
+                # Only update if name actually changed
+                if new_name != take_name:
+                    # Transfer take data if it exists
+                    if take_name in self.take_data:
+                        self.take_data[new_name] = self.take_data[take_name]
+                        del self.take_data[take_name]
+                    
+                    # Update the take name in MotionBuilder
+                    target_take.Name = new_name
+                    
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to toggle unfinished marker for take {take_name}: {e}")
         
         self._save_config()
         self.update_take_list()
@@ -2244,6 +2323,44 @@ class TakeHandlerWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to rename take: {e}")
     
+    def _toggle_unfinished_marker(self, take_name):
+        """Toggle the [X] unfinished marker on a take name."""
+        system = FBSystem()
+        target_take = None
+        
+        # Find the take
+        for i in range(len(system.Scene.Takes)):
+            take = system.Scene.Takes[i]
+            if strip_prefix(take.Name) == take_name:
+                target_take = take
+                break
+        
+        if not target_take:
+            return
+            
+        try:
+            # Check if take is currently marked as unfinished
+            if take_name.endswith(" [X]"):
+                # Remove unfinished marker
+                new_name = take_name[:-4]  # Remove " [X]"
+            else:
+                # Add unfinished marker
+                new_name = f"{take_name} [X]"
+            
+            # Transfer take data if it exists
+            if take_name in self.take_data:
+                self.take_data[new_name] = self.take_data[take_name]
+                del self.take_data[take_name]
+            
+            # Update the take name in MotionBuilder
+            target_take.Name = new_name
+            
+            # Update the UI
+            self.update_take_list()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to toggle unfinished marker: {e}")
+    
     def update_current_take_only(self):
         """Fast update method that only updates the current take highlighting."""
         system = FBSystem()
@@ -2511,6 +2628,15 @@ class TakeListDelegate(QStyledItemDelegate):
         if is_current:
             # Current take gets yellow text
             painter.setPen(QColor(255, 255, 0))  # Bright yellow
+        elif text.endswith(" [X]"):
+            # Unfinished takes get red tint (20% red, 80% normal)
+            base_color = option.palette.text().color()
+            red_tinted = QColor(
+                int(base_color.red() * 0.8 + 255 * 0.2),
+                int(base_color.green() * 0.8),
+                int(base_color.blue() * 0.8)
+            )
+            painter.setPen(red_tinted)
         elif option.state & QStyle.State_Selected:
             painter.setPen(option.palette.highlightedText().color())
         else:

@@ -2221,7 +2221,15 @@ class MotionBuilderExporter(QMainWindow):
                     take_layout.setContentsMargins(0, 0, 0, 0)
                     
                     checkbox = QCheckBox(take.Name)
-                    checkbox.setChecked(default_sel)
+                    
+                    # Check if take is marked as unfinished with [X] suffix
+                    if take.Name.endswith(" [X]"):
+                        checkbox.setEnabled(False)
+                        checkbox.setChecked(False)
+                        checkbox.setToolTip("This take is marked as unfinished and cannot be exported")
+                    else:
+                        checkbox.setChecked(default_sel)
+                    
                     take_layout.addWidget(checkbox)
                     
                     export_info = saved_scene.get("takes", {}).get(take.Name, None)
@@ -2272,7 +2280,15 @@ class MotionBuilderExporter(QMainWindow):
                     take_layout.setContentsMargins(0, 0, 0, 0)
                     
                     checkbox = QCheckBox(take.Name)
-                    checkbox.setChecked(default_sel)
+                    
+                    # Check if take is marked as unfinished with [X] suffix
+                    if take.Name.endswith(" [X]"):
+                        checkbox.setEnabled(False)
+                        checkbox.setChecked(False)
+                        checkbox.setToolTip("This take is marked as unfinished and cannot be exported")
+                    else:
+                        checkbox.setChecked(default_sel)
+                    
                     take_layout.addWidget(checkbox)
                     
                     export_info = saved_scene.get("takes", {}).get(take.Name, None)
@@ -2297,14 +2313,20 @@ class MotionBuilderExporter(QMainWindow):
         parent_layout.addWidget(takes_group, 1)  # 1 = stretch factor
         
     def toggle_checkboxes(self, checkboxes):
-        """Toggle all checkboxes in a list"""
-        if all(cb.isChecked() for cb in checkboxes):
-            # All are checked, so uncheck all
-            for cb in checkboxes:
+        """Toggle all checkboxes in a list, skipping unfinished takes"""
+        # Filter out disabled checkboxes (unfinished takes)
+        enabled_checkboxes = [cb for cb in checkboxes if cb.isEnabled()]
+        
+        if not enabled_checkboxes:
+            return  # No enabled checkboxes to toggle
+        
+        if all(cb.isChecked() for cb in enabled_checkboxes):
+            # All enabled are checked, so uncheck all enabled
+            for cb in enabled_checkboxes:
                 cb.setChecked(False)
         else:
-            # Some or none are checked, so check all
-            for cb in checkboxes:
+            # Some or none are checked, so check all enabled
+            for cb in enabled_checkboxes:
                 cb.setChecked(True)
     
     def save_prefix(self, text):
