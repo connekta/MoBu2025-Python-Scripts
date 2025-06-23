@@ -1165,6 +1165,71 @@ class TakeHandlerWindow(QMainWindow):
         
         return operations
     
+    def _sort_group_takes(self, group_name):
+        """Sort takes within a specific group alphabetically."""
+        system = FBSystem()
+        
+        # Remember the current take to restore it later
+        current_take = system.CurrentTake
+        
+        try:
+            # Get all takes and analyze group structure
+            all_scene_takes = []
+            for i in range(len(system.Scene.Takes)):
+                take = system.Scene.Takes[i]
+                take_name = strip_prefix(take.Name)
+                all_scene_takes.append((take, take_name, i))
+            
+            # Analyze groups to find the target group
+            groups = self._analyze_take_groups(all_scene_takes)
+            target_group = None
+            
+            for group in groups:
+                if group['header'] and group['header'][1] == group_name:
+                    target_group = group
+                    break
+            
+            if not target_group or not target_group['members']:
+                return  # Nothing to sort
+            
+            # Get only the takes that belong to this group for sorting
+            takes_to_sort = target_group['members'][:]
+            
+            # Generate sorting operations using the same logic as main sort
+            sorted_operations = self._get_group_aware_sort_operations(groups, takes_to_sort)
+            
+            # Execute the sorting operations using the same method as main sort
+            if sorted_operations and len(system.Scene.Takes) > 0:
+                first_take = system.Scene.Takes[0]
+                takes_list = first_take.GetDst(1)
+                
+                if takes_list:
+                    # Apply all sorting operations
+                    for take_obj, target_position in sorted_operations:
+                        # Find current position of this take in the takes list
+                        src_id = -1
+                        for j in range(takes_list.GetSrcCount()):
+                            src = takes_list.GetSrc(j)
+                            if src == take_obj:
+                                src_id = j
+                                break
+                        
+                        if src_id >= 0 and src_id != target_position:
+                            takes_list.MoveSrcAt(src_id, target_position)
+                    
+                    system.Scene.Evaluate()
+            
+            # Restore the original current take
+            if current_take:
+                system.CurrentTake = current_take
+            
+            # Update the UI
+            self.update_take_list()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to sort group takes: {e}")
+            self.update_take_list()
+    
     def _create_new_take(self):
         name, ok = QInputDialog.getText(self, "New Take", "Enter take name:")
         if ok and name.strip():
@@ -1371,6 +1436,15 @@ class TakeHandlerWindow(QMainWindow):
         add_take_below_action = menu.addAction("Add new Take below")
         rename_action = menu.addAction("Rename Take")
         menu.addSeparator()
+        create_group_action = menu.addAction("Create Group for Take")
+        
+        # Add "Sort Group Takes" option if this is a group take
+        if is_group_take(take_name):
+            sort_group_action = menu.addAction("Sort Group Takes")
+            menu.addSeparator()
+        else:
+            sort_group_action = None
+            menu.addSeparator()
         
         # Mark as Unfinished option (just before delete)
         if take_name.endswith(" [X]"):
@@ -1428,6 +1502,10 @@ class TakeHandlerWindow(QMainWindow):
         elif action == rename_action:
             # Store the take name instead of the item reference which might be deleted
             self._start_inline_rename(take_name)
+        elif action == create_group_action:
+            self._create_group_for_selected([item])
+        elif action == sort_group_action and is_group_take(take_name):
+            self._sort_group_takes(take_name)
         elif action == mark_unfinished_action:
             self._toggle_unfinished_marker(take_name)
         elif action == delete_action:

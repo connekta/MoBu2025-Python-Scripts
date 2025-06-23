@@ -17,6 +17,8 @@ I've used ClaudeAI to assist me in creating these. It's just scripts I've needed
 - **TakeRenamer.py** - Batch rename takes
 - **fileOpen.py** - File opening utilities
 - **FileBrowser/** - Custom file browser module related to fileOpen.py
+- **MiscToolbox.py** - Modular utility toolbox with dynamic tool discovery
+- **MiscToolbox/** - Individual tool scripts for the utility toolbox
 
 ## Scripts Explanation
 
@@ -68,6 +70,25 @@ A more extensive setup for renaming a lot of takes. Supports adding Prefix/Suffi
 ![image](https://github.com/user-attachments/assets/3bbd4351-b5ee-4af3-a632-e82d883637de)
 
 A more focused File opener where you can add manual Directories for it to show as a folder-structure to search within - instead of having the full system. Also supports adding files as favourites and shows recent files. Has a Search button that will only show .fbx files from within the added directories.
+- **MiscToolbox.py**
+
+![MiscToolbox](https://github.com/user-attachments/assets/placeholder-image)
+
+A modular utility toolbox that automatically discovers and loads tools from separate Python files. Features a clean MotionBuilder-themed interface with individual tool buttons. Tools are loaded dynamically from the MiscToolbox subfolder, making it easy to add new utilities without modifying the main script.
+
+**Current Tools:**
+- **IK/FK Multi-Take Key** - Set IK/FK blend values from selected effectors to all takes in the scene with Replace/Add modes
+
+**Adding New Tools:**
+Create a new Python file in the MiscToolbox/ folder with:
+- `DISPLAY_NAME = "Your Tool Name"` - Custom display name
+- `DESCRIPTION = "Brief description"` - Tool description for UI
+- `def run():` - Main function that executes the tool
+
+The toolbox automatically discovers new tools and creates buttons for them.
+
+- **MiscToolbox/** - Individual tool scripts:
+  - **IKFKMultiTakeKey.py** - IK/FK blend value propagation across all takes with intelligent selection monitoring and non-modal interface
 
 ## Known Bugs
 
