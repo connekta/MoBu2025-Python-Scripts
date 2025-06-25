@@ -3632,7 +3632,13 @@ class MotionBuilderExporter(QMainWindow):
         for group, items in selections.items():
             for take_name, selected in items.items():
                 if selected and takes.get(take_name, {}).get("exported", False):
-                    folder = updated_settings.get("groups", {}).get(group, "") if group != "ungrouped" else updated_settings.get("global", "")
+                    if group != "ungrouped":
+                        folder = updated_settings.get("groups", {}).get(group, "")
+                        # If group folder is empty, fall back to global folder (same logic as actual export)
+                        if not folder.strip():
+                            folder = updated_settings.get("global", "")
+                    else:
+                        folder = updated_settings.get("global", "")
                     folder_groups.setdefault(folder, []).append(take_name)
         
         row = 0
