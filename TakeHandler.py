@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QListWidget, QListWidg
                                QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QMenu, 
                                QDialog, QLabel, QLineEdit, QInputDialog, QTextEdit,
                                QMessageBox, QStyledItemDelegate, QStyle, QSizePolicy,
-                               QSizeGrip)
+                               QSizeGrip, QGroupBox, QCheckBox, QGridLayout, QButtonGroup,
+                               QColorDialog)
 from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QPolygon, QCursor, QFont
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRect, QPoint
 
@@ -49,6 +50,156 @@ def get_settings_path():
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
     return os.path.join(base_dir, "window_settings.json")
+
+def get_global_settings_path():
+    """Get the global settings path for script settings"""
+    base_dir = os.path.expanduser("C:/Users/morri/Documents/MB/CustomPythonSaveData")
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir)
+    return os.path.join(base_dir, "PythonScriptGlobalSettings.json")
+
+def load_global_settings():
+    """Load global script settings"""
+    settings_path = get_global_settings_path()
+    default_settings = {
+        "naming_convention": {
+            "first_capital_letter": False,
+            "no_capital_letters": False,
+            "no_spaces": False,
+            "direction_style": "none"  # "none", "short", "full", "mixed", "single"
+        },
+        "accessibility": {
+            "current_take_color": "yellow"
+        }
+    }
+    
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return default_settings
+
+def save_global_settings(settings):
+    """Save global script settings"""
+    settings_path = get_global_settings_path()
+    try:
+        with open(settings_path, 'w') as f:
+            json.dump(settings, f, indent=2)
+    except IOError:
+        pass
+
+def apply_naming_convention(take_name, settings=None):
+    """Apply naming convention rules to a take name"""
+    if settings is None:
+        settings = load_global_settings()
+    
+    # Skip naming convention for group takes
+    if is_group_take(take_name):
+        return take_name
+    
+    naming = settings.get("naming_convention", {})
+    result = take_name
+    
+    # Apply direction replacements first
+    direction_style = naming.get("direction_style", "none")
+    if direction_style != "none":
+        result = apply_direction_replacements(result, direction_style, naming)
+    
+    # Apply no spaces rule
+    if naming.get("no_spaces", False):
+        result = result.replace(" ", "_")
+    
+    # Apply capitalization rules
+    if naming.get("first_capital_letter", False):
+        result = apply_first_capital_letter(result)
+    elif naming.get("no_capital_letters", False):
+        result = result.lower()
+    
+    return result
+
+def apply_direction_replacements(text, style, naming_settings):
+    """Apply direction word replacements based on style"""
+    # Define all variations to catch
+    variations = {
+        "right": ["rgt", "right", "r"],
+        "left": ["lft", "left", "l"], 
+        "forward": ["fwd", "forward", "forwd", "forwrd", "f"],
+        "backward": ["bwd", "backward", "backwd", "backwrd", "b"]
+    }
+    
+    # Define base replacement mappings based on style
+    base_replacements = {}
+    if style == "short":  # Rgt, Lft, Fwd, Bwd
+        base_replacements = {"right": "Rgt", "left": "Lft", "forward": "Fwd", "backward": "Bwd"}
+    elif style == "full":  # Right, Left, Forward, Backward
+        base_replacements = {"right": "Right", "left": "Left", "forward": "Forward", "backward": "Backward"}
+    elif style == "mixed":  # Right, Left, Fwd, Bwd
+        base_replacements = {"right": "Right", "left": "Left", "forward": "Fwd", "backward": "Bwd"}
+    elif style == "single":  # r, l, f, b
+        base_replacements = {"right": "r", "left": "l", "forward": "f", "backward": "b"}
+    
+    # Apply capitalization rules to the replacements
+    replacements = {}
+    for direction, target in base_replacements.items():
+        if naming_settings.get("no_capital_letters", False):
+            replacements[direction] = target.lower()
+        elif naming_settings.get("first_capital_letter", False):
+            replacements[direction] = target.capitalize()
+        else:
+            replacements[direction] = target
+    
+    result = text
+    
+    # Define custom word boundaries (space, dot, comma, underscore, dash, start/end of string)
+    boundary_chars = r'[ \.,_\-]'
+    
+    # Build a comprehensive pattern that matches all variations at once
+    # This prevents overlapping replacements where replaced text gets processed again
+    all_patterns = []
+    variation_to_target = {}
+    
+    for direction, target in replacements.items():
+        for variation in variations[direction]:
+            # Store the mapping for replacement
+            variation_to_target[variation.lower()] = target
+            # Add to the comprehensive pattern
+            all_patterns.append(re.escape(variation))
+    
+    if all_patterns:
+        # Simple approach: replace each direction word one by one, longest first
+        # Sort by length (longest first) to prevent shorter matches from interfering
+        all_patterns.sort(key=len, reverse=True)
+        
+        # Process each pattern individually to avoid overlapping issues
+        for pattern in all_patterns:
+            target = variation_to_target.get(pattern.lower(), pattern)
+            # Use word boundaries and custom boundary chars
+            pattern_regex = r'(?<![a-zA-Z])' + re.escape(pattern) + r'(?![a-zA-Z])'
+            
+            # Replace all instances of this pattern
+            result = re.sub(pattern_regex, target, result, flags=re.IGNORECASE)
+    
+    return result
+
+def apply_first_capital_letter(text):
+    """Capitalize first letter of each word after space or underscore"""
+    result = ""
+    capitalize_next = True
+    
+    for char in text:
+        if char in [" ", "_"]:
+            result += char
+            capitalize_next = True
+        elif capitalize_next and char.isalpha():
+            result += char.upper()
+            capitalize_next = False
+        else:
+            result += char
+            capitalize_next = False
+    
+    return result
 
 def save_window_settings(window):
     """Save window position and size"""
@@ -502,6 +653,135 @@ class DraggableListWidget(QListWidget):
                 self.editor.hide()
             self.editing_item = None
 
+class NamingToast(QWidget):
+    """Toast notification widget for naming convention changes"""
+    
+    def __init__(self, parent, original_name, processed_name):
+        super(NamingToast, self).__init__(parent)
+        self.parent_window = parent
+        self.original_name = original_name
+        self.processed_name = processed_name
+        
+        # Set window flags for overlay behavior
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Create the toast content
+        self.setup_ui()
+        
+        # Auto-hide timer
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide_toast)
+        
+    def setup_ui(self):
+        """Set up the toast UI"""
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        
+        # Create the message with character-level highlighting
+        message_widget = self.create_highlighted_message()
+        layout.addWidget(message_widget)
+        
+        # Style the toast with better visibility
+        self.setStyleSheet("""
+            NamingToast {
+                background-color: rgba(35, 35, 35, 255);
+                border: 2px solid #777;
+                border-radius: 8px;
+            }
+            QLabel {
+                background-color: rgba(50, 50, 50, 255);
+                padding: 4px 8px;
+                border-radius: 4px;
+            }
+        """)
+        
+        # Size to content
+        self.adjustSize()
+    
+    def create_highlighted_message(self):
+        """Create a widget with the highlighted before/after message"""
+        from PySide6.QtWidgets import QLabel
+        
+        # Generate character-level differences
+        char_changes = self.get_character_differences()
+        
+        # Build HTML with orange highlighting for changed characters
+        html_parts = []
+        
+        # Add "Renamed: " prefix
+        html_parts.append('<span style="color: #dcdcdc;">Renamed: \'</span>')
+        
+        # Add original name (normal color)
+        html_parts.append(f'<span style="color: #dcdcdc;">{self.original_name}</span>')
+        
+        # Add arrow
+        html_parts.append('<span style="color: #dcdcdc;"> → </span>')
+        
+        # Add processed name with highlighting
+        for char, is_changed in char_changes:
+            if is_changed:
+                html_parts.append(f'<span style="color: orange; font-weight: bold;">{char}</span>')
+            else:
+                html_parts.append(f'<span style="color: #dcdcdc;">{char}</span>')
+        
+        # Close quote
+        html_parts.append('<span style="color: #dcdcdc;">\'</span>')
+        
+        html_content = ''.join(html_parts)
+        
+        label = QLabel()
+        label.setText(html_content)
+        # Style will be applied by the main stylesheet
+        
+        return label
+    
+    def get_character_differences(self):
+        """Get list of (character, is_changed) tuples for highlighting"""
+        char_changes = []
+        
+        # Compare character by character
+        max_len = max(len(self.original_name), len(self.processed_name))
+        for i in range(max_len):
+            orig_char = self.original_name[i] if i < len(self.original_name) else ""
+            proc_char = self.processed_name[i] if i < len(self.processed_name) else ""
+            
+            if proc_char:  # Only add if processed character exists
+                is_changed = (orig_char != proc_char)
+                char_changes.append((proc_char, is_changed))
+        
+        return char_changes
+    
+    def show(self):
+        """Show the toast positioned next to the + button at the bottom"""
+        if not self.parent_window:
+            return
+        
+        # Position at the very left edge over the + button
+        if hasattr(self.parent_window, 'new_take_button'):
+            button = self.parent_window.new_take_button
+            # Get button position in global coordinates
+            button_pos = button.mapToGlobal(button.rect().topLeft())
+            # Position toast at the very left edge of window, at button level
+            parent_left = self.parent_window.mapToGlobal(self.parent_window.rect().topLeft()).x()
+            self.move(parent_left, button_pos.y() - 5)
+        else:
+            # Fallback: position at bottom left of parent window
+            parent_pos = self.parent_window.mapToGlobal(self.parent_window.rect().bottomLeft())
+            self.move(parent_pos.x(), parent_pos.y() - 50)
+        
+        # Show the toast
+        super().show()
+        
+        # Start the hide timer (3 seconds for toast)
+        self.hide_timer.start(3000)
+    
+    def hide_toast(self):
+        """Hide and clean up the toast"""
+        self.hide()
+        self.deleteLater()
+
 class TakeHandlerWindow(QMainWindow):
     """Custom Take Handler window."""
     def __init__(self, parent=None):
@@ -576,6 +856,34 @@ class TakeHandlerWindow(QMainWindow):
         
         button_layout.addWidget(self.new_take_button)
         button_layout.addStretch()
+        
+        # Create a small settings button with cog icon
+        self.settings_button = QPushButton("⚙️")
+        self.settings_button.setToolTip("Take Handler Settings")
+        self.settings_button.setFixedSize(18, 18)  # Same size as other buttons
+        self.settings_button.setStyleSheet("""
+            QPushButton {
+                background-color: #7f8c8d;
+                color: white;
+                font-weight: bold;
+                border-radius: 0px;
+                border: none;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #6c7b7d;
+            }
+            QPushButton:pressed {
+                background-color: #5a6061;
+            }
+        """)
+        self.settings_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.settings_button.clicked.connect(self._open_settings)
+        
+        button_layout.addWidget(self.settings_button)
+        
+        # Add small spacing between settings and sort button
+        button_layout.addSpacing(3)
         
         # Create a small sort button with sort symbol, aligned to the right
         self.sort_button = QPushButton("≡")
@@ -701,6 +1009,15 @@ class TakeHandlerWindow(QMainWindow):
         # Cycle through colors
         color_index = group_count % len(muted_colors)
         return muted_colors[color_index]
+    
+    def show_naming_toast(self, original_name, processed_name):
+        """Show a toast notification for naming convention changes"""
+        if original_name == processed_name:
+            return  # No change, no toast needed
+        
+        # Create and show toast with character-level highlighting
+        toast = NamingToast(self, original_name, processed_name)
+        toast.show()
     
     def reorder_takes(self, source_row, target_row):
         """Reorder takes using the MotionBuilder plug system to match Navigator's order with our UI."""
@@ -1230,14 +1547,26 @@ class TakeHandlerWindow(QMainWindow):
             QMessageBox.warning(self, "Error", f"Failed to sort group takes: {e}")
             self.update_take_list()
     
+    def _open_settings(self):
+        """Open the Take Handler Settings dialog"""
+        settings_dialog = TakeHandlerSettings(self)
+        settings_dialog.exec_()
+    
     def _create_new_take(self):
         name, ok = QInputDialog.getText(self, "New Take", "Enter take name:")
         if ok and name.strip():
             try:
                 system = FBSystem()
-                # When creating a new take, do not add a prefix.
-                new_take = FBTake(name.strip())
+                # Apply naming convention to the new take name
+                original_name = name.strip()
+                processed_name = apply_naming_convention(original_name)
+                new_take = FBTake(processed_name)
                 system.Scene.Takes.append(new_take)
+                
+                # Show toast if the name was changed by naming convention
+                if original_name != processed_name:
+                    QTimer.singleShot(250, lambda o=original_name, p=processed_name: self.show_naming_toast(o, p))
+                
                 self.update_take_list()
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to create take: {e}")
@@ -1732,10 +2061,16 @@ class TakeHandlerWindow(QMainWindow):
                     
             if original_take:
                 new_name = f"{take_name}_copy"
+                # Apply naming convention to the copy name
+                processed_name = apply_naming_convention(new_name)
                 try:
                     # Use CopyTake to properly duplicate the take with all animation data
-                    new_take = original_take.CopyTake(new_name)
+                    new_take = original_take.CopyTake(processed_name)
                     duplicate_pairs.append((original_take, new_take))
+                    
+                    # Show toast if the name was changed by naming convention
+                    if new_name != processed_name:
+                        QTimer.singleShot(300, lambda o=new_name, p=processed_name: self.show_naming_toast(o, p))
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to duplicate take {take_name}: {e}")
         
@@ -1835,7 +2170,13 @@ class TakeHandlerWindow(QMainWindow):
                         self.take_data[new_name] = self.take_data[take_name]
                         del self.take_data[take_name]
                     
-                    take_to_rename.Name = new_name
+                    # Apply naming convention to the new name
+                    processed_name = apply_naming_convention(new_name)
+                    take_to_rename.Name = processed_name
+                    
+                    # Highlight the take if the name was changed by naming convention (with delay for UI update)
+                    if new_name != processed_name:
+                        QTimer.singleShot(100, lambda o=new_name, p=processed_name: self.show_naming_toast(o, p))
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Failed to rename take {take_name}: {e}")
         
@@ -1957,7 +2298,9 @@ class TakeHandlerWindow(QMainWindow):
                         del self.take_data[take_name]
                     
                     # Update the take name in MotionBuilder
-                    target_take.Name = new_name
+                    # Apply naming convention to the new name
+                    processed_name = apply_naming_convention(new_name)
+                    target_take.Name = processed_name
                     
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to toggle unfinished marker for take {take_name}: {e}")
@@ -2258,9 +2601,11 @@ class TakeHandlerWindow(QMainWindow):
         try:
             # Auto-generate name without popup
             new_name = f"{take_name}_copy"
+            # Apply naming convention to the copy name
+            processed_name = apply_naming_convention(new_name)
             
             # Use CopyTake to properly duplicate the take with all animation data
-            new_take = original_take.CopyTake(new_name)
+            new_take = original_take.CopyTake(processed_name)
             
             # Now find both takes' positions AFTER the duplication
             original_pos = -1
@@ -2348,7 +2693,14 @@ class TakeHandlerWindow(QMainWindow):
                     assigned_color = self._get_next_group_color()
                     self.take_data[new_name_with_prefix]['color'] = assigned_color
                 
-                take_to_rename.Name = new_name_with_prefix
+                # Apply naming convention to the new name
+                processed_name = apply_naming_convention(new_name_with_prefix)
+                take_to_rename.Name = processed_name
+                
+                # Show toast if the name was changed by naming convention (with delay for UI update)
+                if new_name_with_prefix != processed_name:
+                    QTimer.singleShot(200, lambda o=new_name_with_prefix, p=processed_name: self.show_naming_toast(o, p))
+                
                 self._save_config()
                 self.update_take_list()
             except Exception as e:
@@ -2390,7 +2742,9 @@ class TakeHandlerWindow(QMainWindow):
                         self.take_data[new_name_with_prefix] = self.take_data[take_name]
                         del self.take_data[take_name]
                     
-                    take_to_rename.Name = new_name_with_prefix
+                    # Apply naming convention to the new name
+                    processed_name = apply_naming_convention(new_name)
+                    take_to_rename.Name = processed_name
                     self._save_config()
                     # Preserve scroll position using deferred restoration
                     scrollbar = self.take_list.verticalScrollBar()
@@ -2431,7 +2785,9 @@ class TakeHandlerWindow(QMainWindow):
                 del self.take_data[take_name]
             
             # Update the take name in MotionBuilder
-            target_take.Name = new_name
+            # Apply naming convention to the new name
+            processed_name = apply_naming_convention(new_name)
+            target_take.Name = processed_name
             
             # Update the UI
             self.update_take_list()
@@ -2702,10 +3058,12 @@ class TakeListDelegate(QStyledItemDelegate):
         text_rect = option.rect.adjusted(offset, 0, -right_margin, 0)
         text = index.data(Qt.DisplayRole)
         
-        # Set text color - prioritize current take (yellow) over other coloring
+        # Set text color - prioritize current take over other coloring
         if is_current:
-            # Current take gets yellow text
-            painter.setPen(QColor(255, 255, 0))  # Bright yellow
+            # Current take gets color from settings
+            settings = load_global_settings()
+            current_take_color = settings.get("accessibility", {}).get("current_take_color", "yellow")
+            painter.setPen(QColor(current_take_color))
         elif text.endswith(" [X]"):
             # Unfinished takes get red tint (20% red, 80% normal)
             base_color = option.palette.text().color()
@@ -2727,6 +3085,7 @@ class TakeListDelegate(QStyledItemDelegate):
             else:
                 painter.setPen(option.palette.text().color())
         
+        # Draw normal text
         painter.drawText(text_rect, Qt.AlignVCenter, text)
         
         # Draw note icon and star on top of everything else
@@ -2746,6 +3105,7 @@ class TakeListDelegate(QStyledItemDelegate):
             painter.drawText(star_rect, Qt.AlignCenter, "★")
         
         painter.restore()
+    
 
 def show_take_handler():
     """Show the Take Handler window."""
@@ -2762,6 +3122,662 @@ def show_take_handler():
     delegate = TakeListDelegate(window=window)
     window.take_list.setItemDelegate(delegate)
     return window
+
+class TakeHandlerSettings(QDialog):
+    """Settings dialog for Take Handler with expandable sections"""
+    
+    def __init__(self, parent=None):
+        super(TakeHandlerSettings, self).__init__(parent)
+        self.setWindowTitle("Take Handler Settings")
+        self.setMinimumSize(400, 300)
+        
+        # Track expansion states
+        self.take_naming_expanded = True  # Expanded by default
+        self.tags_expanded = False
+        self.accessibility_expanded = False
+        
+        self.setup_ui()
+        self.load_settings()
+        
+    def setup_ui(self):
+        """Set up the settings dialog UI"""
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(8)
+        
+        # Create the expandable sections
+        self.create_take_naming_group(main_layout)
+        self.create_tags_group(main_layout)
+        self.create_accessibility_group(main_layout)
+        
+        # Add stretch to push everything to the top
+        main_layout.addStretch()
+        
+        # Add Apply/Cancel buttons (centered)
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        apply_button = QPushButton("Apply")
+        apply_button.setDefault(True)
+        apply_button.clicked.connect(self.apply_settings)
+        button_layout.addWidget(apply_button)
+        
+        button_layout.addStretch()
+        
+        main_layout.addLayout(button_layout)
+    
+    def create_take_naming_group(self, parent_layout):
+        """Create the Take Naming Convention expandable group"""
+        # Create collapsible group (collapsed by default)
+        group_box = QGroupBox("► Take Naming Convention")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_take_naming_clicked()
+        
+        self.take_naming_group = group_box
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(5, 15, 5, 5)
+        
+        # Content container (hidden by default)
+        self.take_naming_container = QWidget()
+        container_layout = QGridLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(5)
+        
+        # Naming Convention Checkboxes
+        self.first_capital_cb = QCheckBox("First Capital Letter")
+        self.no_capitals_cb = QCheckBox("No Capital Letters")
+        self.no_spaces_cb = QCheckBox("No Spaces")
+        
+        # Direction checkboxes
+        self.rgt_lft_cb = QCheckBox("Rgt, Lft, Fwd, Bwd")
+        self.right_left_cb = QCheckBox("Right, Left, Forward, Backward")
+        self.right_left_fwd_cb = QCheckBox("Right, Left, Fwd, Bwd")
+        self.single_letter_cb = QCheckBox("r, l, f, b")
+        
+        # Set up tooltips with examples
+        self.setup_tooltips()
+        
+        # Add to grid layout - 2 columns for checkboxes
+        container_layout.addWidget(self.first_capital_cb, 0, 0)
+        container_layout.addWidget(self.no_capitals_cb, 0, 1)
+        container_layout.addWidget(self.no_spaces_cb, 1, 0)
+        container_layout.addWidget(self.rgt_lft_cb, 2, 0)
+        container_layout.addWidget(self.right_left_cb, 2, 1)
+        container_layout.addWidget(self.right_left_fwd_cb, 3, 0)
+        container_layout.addWidget(self.single_letter_cb, 3, 1)
+        
+        # Set up button groups for mutually exclusive checkboxes
+        self.capital_group = QButtonGroup()
+        self.capital_group.addButton(self.first_capital_cb)
+        self.capital_group.addButton(self.no_capitals_cb)
+        self.capital_group.setExclusive(False)  # We'll handle exclusivity manually
+        
+        self.direction_group = QButtonGroup()
+        self.direction_group.addButton(self.rgt_lft_cb)
+        self.direction_group.addButton(self.right_left_cb)
+        self.direction_group.addButton(self.right_left_fwd_cb)
+        self.direction_group.addButton(self.single_letter_cb)
+        self.direction_group.setExclusive(False)  # We'll handle exclusivity manually
+        
+        # Connect signals for mutual exclusivity
+        self.first_capital_cb.toggled.connect(self.on_first_capital_toggled)
+        self.no_capitals_cb.toggled.connect(self.on_no_capitals_toggled)
+        
+        self.rgt_lft_cb.toggled.connect(lambda checked: self.on_direction_toggled(checked, "short"))
+        self.right_left_cb.toggled.connect(lambda checked: self.on_direction_toggled(checked, "full"))
+        self.right_left_fwd_cb.toggled.connect(lambda checked: self.on_direction_toggled(checked, "mixed"))
+        self.single_letter_cb.toggled.connect(lambda checked: self.on_direction_toggled(checked, "single"))
+        
+        self.take_naming_container.setLayout(container_layout)
+        
+        group_layout.addWidget(self.take_naming_container)
+        group_box.setLayout(group_layout)
+        
+        # Set initial state (expanded by default)
+        if self.take_naming_expanded:
+            self.take_naming_container.setVisible(True)
+            group_box.setFixedHeight(160)  # Expanded height
+            group_box.setTitle("▼ Take Naming Convention")
+        else:
+            self.take_naming_container.setVisible(False)
+            group_box.setFixedHeight(30)  # Collapsed height
+            group_box.setTitle("► Take Naming Convention")
+        
+        parent_layout.addWidget(group_box)
+    
+    def create_tags_group(self, parent_layout):
+        """Create the Tags expandable group"""
+        # Create collapsible group (collapsed by default)
+        group_box = QGroupBox("► Tags")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_tags_clicked()
+        
+        self.tags_group = group_box
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(5, 15, 5, 5)
+        
+        # Content container (hidden by default)
+        self.tags_container = QWidget()
+        container_layout = QVBoxLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(3)
+        
+        # Tags list area
+        self.tags_list_widget = QWidget()
+        self.tags_list_layout = QVBoxLayout()
+        self.tags_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.tags_list_layout.setSpacing(2)
+        self.tags_list_widget.setLayout(self.tags_list_layout)
+        
+        container_layout.addWidget(self.tags_list_widget)
+        
+        # Create Tag button at bottom
+        create_tag_button = QPushButton("Create Tag")
+        create_tag_button.clicked.connect(self.create_new_tag)
+        container_layout.addWidget(create_tag_button)
+        
+        self.tags_container.setLayout(container_layout)
+        self.tags_container.setVisible(False)  # Hidden by default
+        
+        group_layout.addWidget(self.tags_container)
+        group_box.setLayout(group_layout)
+        group_box.setFixedHeight(30)  # Collapsed height
+        
+        parent_layout.addWidget(group_box)
+        
+        # Populate existing tags
+        self.populate_existing_tags()
+    
+    def get_collapsible_group_style(self):
+        """Get the CSS style for collapsible groups (matching Controlify exactly)"""
+        return """
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+                margin-top: 6px;
+                padding-top: 6px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QGroupBox:hover::title {
+                color: #cccccc;
+            }
+        """
+    
+    def populate_existing_tags(self):
+        """Populate the tags list with existing tags"""
+        # Get existing tags from the parent take handler
+        if hasattr(self.parent(), '_get_existing_tags'):
+            existing_tags = self.parent()._get_existing_tags()
+            
+            # Clear existing widgets
+            while self.tags_list_layout.count():
+                child = self.tags_list_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            
+            # Add each tag with edit button
+            for tag_name in existing_tags:
+                self.add_tag_to_list(tag_name)
+    
+    def add_tag_to_list(self, tag_name):
+        """Add a tag to the list with edit button"""
+        tag_widget = QWidget()
+        tag_layout = QHBoxLayout()
+        tag_layout.setContentsMargins(0, 0, 0, 0)
+        tag_layout.setSpacing(5)
+        
+        # Tag name label
+        tag_label = QLabel(tag_name)
+        tag_layout.addWidget(tag_label)
+        
+        tag_layout.addStretch()
+        
+        # Edit button
+        edit_button = QPushButton("Edit")
+        edit_button.setFixedSize(40, 20)
+        edit_button.clicked.connect(lambda: self.edit_tag(tag_name))
+        tag_layout.addWidget(edit_button)
+        
+        tag_widget.setLayout(tag_layout)
+        self.tags_list_layout.addWidget(tag_widget)
+    
+    def create_new_tag(self):
+        """Create a new tag using the TagDialog"""
+        dialog = TagDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            tag_name, tag_color = dialog.get_values()
+            if tag_name:
+                # Refresh the tags list
+                self.populate_existing_tags()
+                QMessageBox.information(self, "Tag Created", f"Tag '{tag_name}' has been created.")
+    
+    def edit_tag(self, tag_name):
+        """Edit an existing tag using the TagDialog"""
+        # Find the existing tag's color from the parent's take data
+        existing_color = None
+        if hasattr(self.parent(), 'take_data'):
+            for data in self.parent().take_data.values():
+                if data.get('tag') == tag_name:
+                    existing_color = data.get('color')
+                    break
+        
+        dialog = TagDialog(self, existing_tag=tag_name, existing_color=existing_color)
+        if dialog.exec_() == QDialog.Accepted:
+            new_tag_name, new_tag_color = dialog.get_values()
+            if new_tag_name and new_tag_name != tag_name:
+                # Update all takes with the old tag to use the new tag name
+                if hasattr(self.parent(), 'take_data'):
+                    for data in self.parent().take_data.values():
+                        if data.get('tag') == tag_name:
+                            data['tag'] = new_tag_name
+                            data['color'] = new_tag_color
+                    # Save changes and refresh
+                    self.parent()._save_config()
+                    self.parent().update_take_list()
+                    self.populate_existing_tags()
+                    QMessageBox.information(self, "Tag Updated", f"Tag '{tag_name}' has been updated to '{new_tag_name}'.")
+            elif new_tag_name == tag_name:
+                # Just color change
+                if hasattr(self.parent(), 'take_data'):
+                    for data in self.parent().take_data.values():
+                        if data.get('tag') == tag_name:
+                            data['color'] = new_tag_color
+                    self.parent()._save_config()
+                    self.parent().update_take_list()
+                    QMessageBox.information(self, "Tag Updated", f"Tag '{tag_name}' color has been updated.")
+    
+    def create_accessibility_group(self, parent_layout):
+        """Create the Accessibility expandable group"""
+        # Create collapsible group (collapsed by default)
+        group_box = QGroupBox("► Accessibility")
+        group_box.setStyleSheet(self.get_collapsible_group_style())
+        group_box.mousePressEvent = lambda event: self.on_accessibility_clicked()
+        
+        self.accessibility_group = group_box
+        group_layout = QVBoxLayout()
+        group_layout.setContentsMargins(5, 15, 5, 5)
+        
+        # Content container (hidden by default)
+        self.accessibility_container = QWidget()
+        container_layout = QVBoxLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(5)
+        
+        # Current take color setting
+        color_layout = QHBoxLayout()
+        color_label = QLabel("Current take color:")
+        color_layout.addWidget(color_label)
+        
+        # Color picker button - start with default yellow
+        self.current_take_color_button = QPushButton()
+        self.current_take_color_button.setFixedSize(30, 20)
+        self.current_take_color_button.setStyleSheet("background-color: yellow; border: 1px solid #666;")
+        self.current_take_color_button.clicked.connect(self.choose_current_take_color)
+        color_layout.addWidget(self.current_take_color_button)
+        
+        color_layout.addStretch()
+        container_layout.addLayout(color_layout)
+        
+        self.accessibility_container.setLayout(container_layout)
+        self.accessibility_container.setVisible(False)  # Hidden by default
+        
+        group_layout.addWidget(self.accessibility_container)
+        group_box.setLayout(group_layout)
+        group_box.setFixedHeight(30)  # Collapsed height
+        
+        parent_layout.addWidget(group_box)
+    
+    def on_accessibility_clicked(self):
+        """Toggle Accessibility group visibility"""
+        if self.accessibility_expanded:
+            # Collapse
+            self.accessibility_container.setVisible(False)
+            self.accessibility_group.setFixedHeight(30)
+            self.accessibility_group.setTitle("► Accessibility")
+            self.accessibility_expanded = False
+        else:
+            # Expand
+            self.accessibility_container.setVisible(True)
+            self.accessibility_group.setFixedHeight(70)  # Height for color picker
+            self.accessibility_group.setTitle("▼ Accessibility")
+            self.accessibility_expanded = True
+        
+        # Adjust dialog size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def choose_current_take_color(self):
+        """Open color picker for current take color"""
+        
+        # Get current color from button
+        current_style = self.current_take_color_button.styleSheet()
+        current_color = QColor("yellow")  # Default fallback
+        
+        # Try to extract color from stylesheet
+        if "background-color:" in current_style:
+            color_str = current_style.split("background-color:")[1].split(";")[0].strip()
+            current_color = QColor(color_str)
+        
+        # Open color dialog
+        color = QColorDialog.getColor(current_color, self, "Choose Current Take Color")
+        if color.isValid():
+            # Update button color
+            color_name = color.name()
+            self.current_take_color_button.setStyleSheet(f"background-color: {color_name}; border: 1px solid #666;")
+    
+    def on_take_naming_clicked(self):
+        """Toggle Take Naming Convention group visibility"""
+        if self.take_naming_expanded:
+            # Collapse
+            self.take_naming_container.setVisible(False)
+            self.take_naming_group.setFixedHeight(30)
+            self.take_naming_group.setTitle("► Take Naming Convention")
+            self.take_naming_expanded = False
+        else:
+            # Expand
+            self.take_naming_container.setVisible(True)
+            self.take_naming_group.setFixedHeight(160)  # Height for 4 rows of content
+            self.take_naming_group.setTitle("▼ Take Naming Convention")
+            self.take_naming_expanded = True
+        
+        # Adjust dialog size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def on_tags_clicked(self):
+        """Toggle Tags group visibility"""
+        if self.tags_expanded:
+            # Collapse
+            self.tags_container.setVisible(False)
+            self.tags_group.setFixedHeight(30)
+            self.tags_group.setTitle("► Tags")
+            self.tags_expanded = False
+        else:
+            # Expand
+            self.tags_container.setVisible(True)
+            # Calculate height based on number of tags + create button
+            tag_count = self.tags_list_layout.count()
+            height = 60 + (tag_count * 25)  # Base height + tag rows
+            self.tags_group.setFixedHeight(height)
+            self.tags_group.setTitle("▼ Tags")
+            self.tags_expanded = True
+        
+        # Adjust dialog size
+        QTimer.singleShot(10, self.adjustSize)
+    
+    def setup_tooltips(self):
+        """Set up tooltips for checkboxes with before/after examples"""
+        example_name = "take_right_left_Forward_Backward"
+        
+        # First Capital Letter tooltip
+        first_cap_result = "Take_right_left_Forward_Backward"
+        first_cap_tooltip = self.create_tooltip_html(example_name, first_cap_result, [(0, 4)])  # "take" -> "Take"
+        self.first_capital_cb.setToolTip(first_cap_tooltip)
+        
+        # No Capital Letters tooltip
+        no_caps_result = "take_right_left_forward_backward"
+        no_caps_tooltip = self.create_tooltip_html(example_name, no_caps_result, [(13, 20), (26, 34)])  # "Forward" -> "forward", "Backward" -> "backward"
+        self.no_capitals_cb.setToolTip(no_caps_tooltip)
+        
+        # No Spaces tooltip
+        no_spaces_result = "take_right_left_Forward_Backward"
+        no_spaces_tooltip = self.create_tooltip_html(example_name, no_spaces_result, [])  # No changes for this example
+        self.no_spaces_cb.setToolTip(no_spaces_tooltip)
+        
+        # Direction tooltips
+        rgt_lft_result = "take_Rgt_Lft_Fwd_Bwd"
+        rgt_lft_tooltip = self.create_tooltip_html(example_name, rgt_lft_result, [(5, 10), (11, 15), (16, 23), (24, 32)])  # All direction words
+        self.rgt_lft_cb.setToolTip(rgt_lft_tooltip)
+        
+        right_left_result = "take_Right_Left_Forward_Backward"
+        right_left_tooltip = self.create_tooltip_html(example_name, right_left_result, [(5, 10), (11, 15)])  # "right" -> "Right", "left" -> "Left"
+        self.right_left_cb.setToolTip(right_left_tooltip)
+        
+        right_left_fwd_result = "take_Right_Left_Fwd_Bwd"
+        right_left_fwd_tooltip = self.create_tooltip_html(example_name, right_left_fwd_result, [(5, 10), (11, 15), (16, 23), (24, 32)])  # All direction words
+        self.right_left_fwd_cb.setToolTip(right_left_fwd_tooltip)
+        
+        single_letter_result = "take_r_l_f_b"
+        single_letter_tooltip = self.create_tooltip_html(example_name, single_letter_result, [(5, 10), (11, 15), (16, 23), (24, 32)])  # All direction words
+        self.single_letter_cb.setToolTip(single_letter_tooltip)
+    
+    def create_tooltip_html(self, original, result, highlight_ranges):
+        """Create HTML tooltip with highlighted differences"""
+        # Start with the result string
+        highlighted_result = result
+        
+        # Apply highlighting in reverse order to avoid position shifts
+        for start, end in reversed(highlight_ranges):
+            if start < len(highlighted_result) and end <= len(highlighted_result):
+                before = highlighted_result[:start]
+                highlight = highlighted_result[start:end]
+                after = highlighted_result[end:]
+                highlighted_result = f"{before}<span style='background-color: yellow; color: black;'>{highlight}</span>{after}"
+        
+        return f"""
+        <div style='font-family: monospace; font-size: 12px;'>
+            <b>Before:</b> {original}<br>
+            <b>After:</b> {highlighted_result}
+        </div>
+        """
+    
+    def load_settings(self):
+        """Load settings from global settings file"""
+        settings = load_global_settings()
+        naming = settings.get("naming_convention", {})
+        
+        # Load checkbox states
+        self.first_capital_cb.setChecked(naming.get("first_capital_letter", False))
+        self.no_capitals_cb.setChecked(naming.get("no_capital_letters", False))
+        self.no_spaces_cb.setChecked(naming.get("no_spaces", False))
+        
+        # Load direction style
+        direction_style = naming.get("direction_style", "none")
+        if direction_style == "short":
+            self.rgt_lft_cb.setChecked(True)
+        elif direction_style == "full":
+            self.right_left_cb.setChecked(True)
+        elif direction_style == "mixed":
+            self.right_left_fwd_cb.setChecked(True)
+        elif direction_style == "single":
+            self.single_letter_cb.setChecked(True)
+        
+        # Load accessibility settings
+        accessibility = settings.get("accessibility", {})
+        current_take_color = accessibility.get("current_take_color", "yellow")
+        if hasattr(self, 'current_take_color_button'):
+            self.current_take_color_button.setStyleSheet(f"background-color: {current_take_color}; border: 1px solid #666;")
+    
+    def on_first_capital_toggled(self, checked):
+        """Handle First Capital Letter checkbox toggle"""
+        if checked and self.no_capitals_cb.isChecked():
+            self.no_capitals_cb.setChecked(False)
+    
+    def on_no_capitals_toggled(self, checked):
+        """Handle No Capital Letters checkbox toggle"""
+        if checked and self.first_capital_cb.isChecked():
+            self.first_capital_cb.setChecked(False)
+    
+    def on_direction_toggled(self, checked, style):
+        """Handle direction checkbox toggle (mutual exclusivity)"""
+        if checked:
+            # Uncheck all other direction checkboxes
+            if style != "short":
+                self.rgt_lft_cb.setChecked(False)
+            if style != "full":
+                self.right_left_cb.setChecked(False)
+            if style != "mixed":
+                self.right_left_fwd_cb.setChecked(False)
+            if style != "single":
+                self.single_letter_cb.setChecked(False)
+            
+            # Set the current one back to checked
+            if style == "short":
+                self.rgt_lft_cb.setChecked(True)
+            elif style == "full":
+                self.right_left_cb.setChecked(True)
+            elif style == "mixed":
+                self.right_left_fwd_cb.setChecked(True)
+            elif style == "single":
+                self.single_letter_cb.setChecked(True)
+    
+    def get_current_settings(self):
+        """Get current settings from the dialog"""
+        direction_style = "none"
+        if self.rgt_lft_cb.isChecked():
+            direction_style = "short"
+        elif self.right_left_cb.isChecked():
+            direction_style = "full"
+        elif self.right_left_fwd_cb.isChecked():
+            direction_style = "mixed"
+        elif self.single_letter_cb.isChecked():
+            direction_style = "single"
+        
+        # Get current take color from button
+        current_take_color = "yellow"  # Default
+        if hasattr(self, 'current_take_color_button'):
+            style = self.current_take_color_button.styleSheet()
+            if "background-color:" in style:
+                color_str = style.split("background-color:")[1].split(";")[0].strip()
+                current_take_color = color_str
+        
+        return {
+            "naming_convention": {
+                "first_capital_letter": self.first_capital_cb.isChecked(),
+                "no_capital_letters": self.no_capitals_cb.isChecked(),
+                "no_spaces": self.no_spaces_cb.isChecked(),
+                "direction_style": direction_style
+            },
+            "accessibility": {
+                "current_take_color": current_take_color
+            }
+        }
+    
+    def settings_have_changed(self):
+        """Check if settings have changed from what's saved"""
+        current = self.get_current_settings()
+        saved = load_global_settings()
+        return current != saved
+    
+    def naming_convention_changed(self):
+        """Check if only naming convention settings have changed"""
+        current = self.get_current_settings()
+        saved = load_global_settings()
+        return current.get("naming_convention") != saved.get("naming_convention")
+    
+    def apply_settings(self):
+        """Apply the settings"""
+        if not self.settings_have_changed():
+            self.accept()
+            return
+        
+        # Check if naming convention changed - only show prompt for naming convention
+        if self.naming_convention_changed():
+            # Show application choice dialog for naming convention
+            choice_dialog = QMessageBox(self)
+            choice_dialog.setWindowTitle("Apply Settings")
+            choice_dialog.setText("How would you like to apply these naming convention settings?")
+            choice_dialog.setIcon(QMessageBox.Question)
+            
+            future_btn = choice_dialog.addButton("Apply for future takes", QMessageBox.AcceptRole)
+            retroactive_btn = choice_dialog.addButton("Apply retroactively for all takes", QMessageBox.ApplyRole)
+            cancel_btn = choice_dialog.addButton("Cancel", QMessageBox.RejectRole)
+            
+            choice_dialog.setDefaultButton(future_btn)
+            choice_dialog.exec_()
+            
+            clicked_button = choice_dialog.clickedButton()
+            
+            if clicked_button == cancel_btn:
+                return
+            
+            # Save the new settings
+            new_settings = self.get_current_settings()
+            save_global_settings(new_settings)
+            
+            if clicked_button == retroactive_btn:
+                self.apply_retroactively()
+        else:
+            # Only non-naming convention settings changed, apply immediately
+            new_settings = self.get_current_settings()
+            save_global_settings(new_settings)
+        
+        self.accept()
+    
+    def apply_retroactively(self):
+        """Apply naming convention to all existing takes"""
+        try:
+            system = FBSystem()
+            renamed_takes = []
+            current_settings = self.get_current_settings()
+            
+            # Go through all takes and check if they need renaming
+            for take in system.Scene.Takes:
+                original_name = take.Name
+                # Remove numerical prefix for processing
+                clean_name = strip_prefix(original_name)
+                new_name = apply_naming_convention(clean_name, current_settings)
+                
+                # Add back the prefix if it existed
+                if original_name != clean_name:
+                    prefix = original_name[:len(original_name) - len(clean_name)]
+                    new_name = prefix + new_name
+                
+                if original_name != new_name:
+                    # Apply naming convention to the new name
+                    processed_name = apply_naming_convention(new_name)
+                    take.Name = processed_name
+                    renamed_takes.append((original_name, processed_name))
+            
+            # Show results if any takes were renamed
+            if renamed_takes:
+                self.show_rename_results(renamed_takes)
+            else:
+                QMessageBox.information(self, "No Changes", "All takes already follow the naming convention.")
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply naming convention: {str(e)}")
+    
+    def show_rename_results(self, renamed_takes):
+        """Show a dialog with all the renamed takes"""
+        results_dialog = QDialog(self)
+        results_dialog.setWindowTitle("Takes Renamed")
+        results_dialog.setMinimumSize(500, 300)
+        
+        layout = QVBoxLayout(results_dialog)
+        
+        label = QLabel(f"Renamed {len(renamed_takes)} takes:")
+        layout.addWidget(label)
+        
+        # Create text widget to show all changes
+        text_widget = QTextEdit()
+        text_widget.setReadOnly(True)
+        
+        text_content = ""
+        for old_name, new_name in renamed_takes:
+            text_content += f"{old_name} → {new_name}\n"
+        
+        text_widget.setPlainText(text_content)
+        layout.addWidget(text_widget)
+        
+        # OK button
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(results_dialog.accept)
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(ok_button)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        results_dialog.exec_()
+
 
 # Global reference
 take_handler_window = None

@@ -1,6 +1,7 @@
 import os
 import json
 import sys
+from datetime import datetime, timedelta
 from PySide6 import QtWidgets, QtCore, QtGui
 from pyfbsdk import FBSystem, FBApplication
 
@@ -38,6 +39,7 @@ class MotionBuilderFileBrowser(QtWidgets.QDialog):
         
         # Show hidden folders flag
         self.showHiddenFolders = False
+        
         
         # Setup UI with dark mode style
         self.setWindowTitle("File Browser")
@@ -753,6 +755,156 @@ class MotionBuilderFileBrowser(QtWidgets.QDialog):
                 return
         self.openRecentFile()
     
+    def getCurrentFileName(self):
+        """Get the current scene filename."""
+        try:
+            app = FBApplication()
+            return app.FBXFileName if app.FBXFileName else None
+        except Exception:
+            return None
+    
+    def getSceneObjectCount(self):
+        """Get count of objects in scene hierarchy (excluding root)."""
+        try:
+            system = FBSystem()
+            return len(system.Scene.RootModel.Children)
+        except Exception:
+            return 0
+    
+    def getFileLastSavedTime(self, file_path):
+        """Get when a file was last saved."""
+        try:
+            if file_path and os.path.exists(file_path):
+                return datetime.fromtimestamp(os.path.getmtime(file_path))
+        except Exception:
+            pass
+        return None
+    
+    def formatTimeSince(self, time_delta):
+        """Format time elapsed in a readable way."""
+        total_seconds = int(time_delta.total_seconds())
+        
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        parts = []
+        if days > 0:
+            parts.append(f"{days} day{'s' if days != 1 else ''}")
+        if hours > 0:
+            parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+        if minutes > 0 or len(parts) == 0:  # Always show minutes if it's the only unit
+            parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+        
+        return ", ".join(parts)
+
+    def shouldPromptForSave(self):
+        """Check if we should prompt user about unsaved progress."""
+        current_file = self.getCurrentFileName()
+        
+        # Case 1: New/Untitled scene
+        if not current_file:
+            # Check if scene has content
+            if self.getSceneObjectCount() > 0:
+                return True, "New/Untitled scene with content"
+            else:
+                return False, "Empty default scene"
+        
+        # Case 2: Saved file - check last save time
+        last_saved = self.getFileLastSavedTime(current_file)
+        if last_saved:
+            time_since_save = datetime.now() - last_saved
+            if time_since_save > timedelta(minutes=2):
+                elapsed_text = self.formatTimeSince(time_since_save)
+                formatted_time = last_saved.strftime("%Y-%m-%d %H:%M:%S")
+                
+                message = f"{elapsed_text} since last save\n\nLast saved at: {formatted_time}"
+                return True, message
+        
+        return False, "Recently saved"
+    
+    def showUnsavedProgressDialog(self, message):
+        """Show unsaved progress dialog with three options."""
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle("Got unsaved progress?")
+        msg_box.setText(message)
+        msg_box.setIcon(QtWidgets.QMessageBox.Question)
+        
+        # Create custom buttons
+        save_and_open_btn = msg_box.addButton("Save and Open", QtWidgets.QMessageBox.AcceptRole)
+        open_btn = msg_box.addButton("Open", QtWidgets.QMessageBox.DestructiveRole)
+        cancel_btn = msg_box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        
+        msg_box.setDefaultButton(save_and_open_btn)
+        
+        # Apply dark theme to message box with centered text
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #2b2b2b;
+                color: #dcdcdc;
+            }
+            QMessageBox QLabel {
+                color: #dcdcdc;
+                text-align: center;
+                qproperty-alignment: AlignCenter;
+            }
+            QMessageBox QPushButton {
+                border: 1px solid #666;
+                border-radius: 4px;
+                padding: 6px 16px;
+                background-color: #4c4c4c;
+                color: #dcdcdc;
+                min-width: 80px;
+            }
+            QMessageBox QPushButton:hover {
+                background-color: #5c5c5c;
+            }
+            QMessageBox QPushButton:pressed {
+                background-color: #3c3c3c;
+            }
+        """)
+        
+        result = msg_box.exec_()
+        clicked_button = msg_box.clickedButton()
+        
+        if clicked_button == save_and_open_btn:
+            return "save_and_open"
+        elif clicked_button == open_btn:
+            return "open"
+        else:
+            return "cancel"
+    
+    def saveCurrentScene(self):
+        """Save the current scene. Returns True if successful."""
+        try:
+            app = FBApplication()
+            current_file = self.getCurrentFileName()
+            
+            if current_file and os.path.exists(current_file):
+                # Save existing file using FileSave with current filename
+                result = app.FileSave(current_file)
+                return result
+            else:
+                # New file - prompt for save location
+                file_dialog = QtWidgets.QFileDialog()
+                file_path, _ = file_dialog.getSaveFileName(
+                    self, 
+                    "Save Scene", 
+                    "", 
+                    "FBX Files (*.fbx);;All Files (*)"
+                )
+                if file_path:
+                    if not file_path.lower().endswith('.fbx'):
+                        file_path += '.fbx'
+                    result = app.FileSave(file_path)
+                    return result
+                else:
+                    return False
+                
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Save Error", f"Failed to save: {str(e)}")
+            return False
+
     def openFile(self, file_path):
         # Ensure file_path is a valid string path
         if not file_path or not isinstance(file_path, (str, bytes, os.PathLike)):
@@ -764,10 +916,26 @@ class MotionBuilderFileBrowser(QtWidgets.QDialog):
             return
         
         try:
+            # Check if we should prompt about unsaved progress
+            should_prompt, message = self.shouldPromptForSave()
+            
+            if should_prompt:
+                choice = self.showUnsavedProgressDialog(message)
+                
+                if choice == "cancel":
+                    return  # User cancelled, abort operation
+                elif choice == "save_and_open":
+                    # Save current scene first
+                    if not self.saveCurrentScene():
+                        return  # Save failed or cancelled, abort operation
+                # For "open" choice, continue without saving
+            
+            # Open the new file
             app = FBApplication()
             app.FileOpen(file_path)
             self.saveRecentFiles(file_path)
             self.accept()
+            
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to open file: {str(e)}")
     
