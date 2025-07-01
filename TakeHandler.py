@@ -102,6 +102,15 @@ def apply_naming_convention(take_name, settings=None):
     naming = settings.get("naming_convention", {})
     result = take_name
     
+    # Check if this is an unfinished take (ends with " [X]")
+    is_unfinished = result.endswith(" [X]")
+    unfinished_marker = ""
+    
+    if is_unfinished:
+        # Temporarily remove the unfinished marker for processing
+        unfinished_marker = " [X]"
+        result = result[:-4]
+    
     # Apply direction replacements first
     direction_style = naming.get("direction_style", "none")
     if direction_style != "none":
@@ -116,6 +125,10 @@ def apply_naming_convention(take_name, settings=None):
         result = apply_first_capital_letter(result)
     elif naming.get("no_capital_letters", False):
         result = result.lower()
+    
+    # Re-add the unfinished marker with preserved space
+    if is_unfinished:
+        result += unfinished_marker
     
     return result
 
