@@ -359,12 +359,14 @@ class MotionBuilderFileBrowser(QtWidgets.QDialog):
     # ---------------------------------------------------------
     def onSearchTextChanged(self, text):
         """Search only from the selected folder (and its children).
-           If no folder is selected, search from all root directories."""
-        if text:
+           If no folder is selected, search from all root directories.
+           Only starts searching after 2+ characters to avoid performance issues."""
+        if text and len(text) > 2:
             self.folderTree.clear()
             self.performSearch(text.lower())
-        else:
+        elif not text:
             self.refreshFolderTree()
+        # If text length is 1-2 characters, do nothing (keep current tree state)
     
     def performSearch(self, search_text):
         selected_items = self.folderTree.selectedItems()
