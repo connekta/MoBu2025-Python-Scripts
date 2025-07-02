@@ -1206,6 +1206,62 @@ class ControlifyDialog(QDialog):
         # Evaluate scene to update the preview
         FBSystem().Scene.Evaluate()
     
+    def is_right_side_control(self, name):
+        """Check if a control name indicates right side using proper pattern matching"""
+        name = name.lower()
+        
+        # Right side patterns - check for word boundaries to avoid false matches
+        right_patterns = [
+            "_r_", "_right_", "_rgt_",  # With underscores around
+            "_r.", "_right.", "_rgt.",  # With underscore before and dot after
+            "_r", "_right", "_rgt"     # At the end with underscore before
+        ]
+        
+        # Check if name ends with any right pattern
+        for pattern in right_patterns:
+            if pattern.endswith("_") or pattern.endswith("."):
+                # Pattern has separator after, check if it exists
+                if pattern in name:
+                    return True
+            else:
+                # Pattern should be at the end
+                if name.endswith(pattern):
+                    return True
+        
+        # Check for patterns at the beginning (like "r_" or "right_")
+        if name.startswith("r_") or name.startswith("right_") or name.startswith("rgt_"):
+            return True
+            
+        return False
+    
+    def is_left_side_control(self, name):
+        """Check if a control name indicates left side using proper pattern matching"""
+        name = name.lower()
+        
+        # Left side patterns - check for word boundaries to avoid false matches
+        left_patterns = [
+            "_l_", "_left_", "_lft_",  # With underscores around
+            "_l.", "_left.", "_lft.",  # With underscore before and dot after
+            "_l", "_left", "_lft"     # At the end with underscore before
+        ]
+        
+        # Check if name ends with any left pattern
+        for pattern in left_patterns:
+            if pattern.endswith("_") or pattern.endswith("."):
+                # Pattern has separator after, check if it exists
+                if pattern in name:
+                    return True
+            else:
+                # Pattern should be at the end
+                if name.endswith(pattern):
+                    return True
+        
+        # Check for patterns at the beginning (like "l_" or "left_")
+        if name.startswith("l_") or name.startswith("left_") or name.startswith("lft_"):
+            return True
+            
+        return False
+
     def apply_appearance_to_marker(self, marker, model_name=None):
         """Apply current appearance settings to a marker"""
         # Get marker appearance settings from UI
@@ -1216,15 +1272,12 @@ class ControlifyDialog(QDialog):
         # Determine color based on Right/Left setting
         if self.lr_color_checkbox.isChecked():
             # Use the original model name if provided, otherwise use marker name
-            check_name = model_name.lower() if model_name else marker.Name.lower()
+            check_name = model_name if model_name else marker.Name
             
-            # Right side patterns - use custom right color
-            if any(pattern in check_name for pattern in ["_r_", "_right_", "_rgt_", "_r.", "_right.", "_rgt.", 
-                                                        "_r", "_right", "_rgt"]):
+            # Check for right/left side patterns with proper word boundary matching
+            if self.is_right_side_control(check_name):
                 marker_color = FBColor(self.right_color_r, self.right_color_g, self.right_color_b)
-            # Left side patterns - use custom left color
-            elif any(pattern in check_name for pattern in ["_l_", "_left_", "_lft_", "_l.", "_left.", "_lft.",
-                                                          "_l", "_left", "_lft"]):
+            elif self.is_left_side_control(check_name):
                 marker_color = FBColor(self.left_color_r, self.left_color_g, self.left_color_b)
             else:
                 # Default to UI color if no pattern found
@@ -2711,15 +2764,12 @@ class ControlifyDialog(QDialog):
                     # Sort markers into left and right based on naming patterns
                     for marker in markers:
                         if marker and marker.ClassName() == "FBModelMarker":
-                            marker_name = marker.Name.lower()
+                            marker_name = marker.Name
                             
-                            # Check for right side patterns
-                            if any(pattern in marker_name for pattern in ["_r_", "_right_", "_rgt_", "_r.", "_right.", "_rgt.", 
-                                                                        "_r", "_right", "_rgt"]):
+                            # Check for right/left side patterns with proper word boundary matching
+                            if self.is_right_side_control(marker_name):
                                 right_extension.ConnectSrc(marker)
-                            # Check for left side patterns
-                            elif any(pattern in marker_name for pattern in ["_l_", "_left_", "_lft_", "_l.", "_left.", "_lft.",
-                                                                          "_l", "_left", "_lft"]):
+                            elif self.is_left_side_control(marker_name):
                                 left_extension.ConnectSrc(marker)
                             else:
                                 # Default to left extension if no pattern found
