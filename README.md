@@ -90,13 +90,28 @@ A modular utility toolbox that automatically discovers and loads tools from sepa
 
 ## Installation
 
+### Quick Setup (Recommended)
+
+1. Download or clone this repository
+2. Run one of the setup scripts:
+   - **Windows**: Double-click `setup_motionbuilder_scripts.bat`
+   - **Cross-platform**: Run `python setup_motionbuilder_scripts.py`
+
+The setup script will automatically:
+- Create the necessary directories in your MotionBuilder installation
+- Copy all Python scripts to `C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\PythonCustomScripts\`
+- Move the `PythonScriptIcons` folder to `C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\`
+- Install `StartupScriptShelf.py` to `C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\PythonStartup\`
+
+### Manual Installation
+
 1. Clone this repository to your MotionBuilder scripts folder:
    ```
    C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\PythonCustomScripts
    ```
 2. If you want the StartupScriptShelf to open on startup move it to bin\config\PythonStartup
-
-3. Restart MotionBuilder or reload Python scripts
+3. Move the `PythonScriptIcons` folder to: `C:\Program Files\Autodesk\MotionBuilder 2025\bin\config\`
+4. Restart MotionBuilder or reload Python scripts
 
 ## Usage
 
