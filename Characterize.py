@@ -19,6 +19,24 @@ def get_character_template_as_dict(xmlFileName):
     
     return xmlSlotNameJointDict
 
+def find_joint_by_name(jointName):
+    """Find a joint by name, handling namespaces"""
+    # First try direct match (backward compatibility)
+    jointObj = FBFindModelByLabelName(jointName)
+    if jointObj:
+        return jointObj
+    
+    # If not found, search through all scene components for suffix match
+    # Focus on FBModelSkeleton objects (joints)
+    for component in FBSystem().Scene.Components:
+        if hasattr(component, 'LongName') and isinstance(component, FBModelSkeleton):
+            # Extract the base name after the last colon
+            baseName = component.LongName.rsplit(':', 1)[-1]
+            if baseName == jointName:
+                return component
+    
+    return None
+
 def get_char_joint_from_slot_name(slotName):
     charSlotNameJointNameDict = get_character_template_as_dict("HIK.xml")
     charJointName = charSlotNameJointNameDict.get(slotName)
@@ -26,27 +44,35 @@ def get_char_joint_from_slot_name(slotName):
     if charJointName is None:
         return None
     
-    charJointObj = FBFindModelByLabelName(charJointName)
+    charJointObj = find_joint_by_name(charJointName)
     return charJointObj
 
 def characterize_character(characterName):
     newCharacter = FBCharacter(characterName)
     charSlotNameJointNameDict = get_character_template_as_dict("HIK.xml")
     
+    successful_mappings = 0
+    
     for slotName, jointName in charSlotNameJointNameDict.items():
         mappingSlot = newCharacter.PropertyList.Find(slotName + "Link")
         if mappingSlot is None:
             continue
         
-        jointObj = FBFindModelByLabelName(jointName)
+        jointObj = find_joint_by_name(jointName)
         if jointObj:
             mappingSlot.append(jointObj)
+            successful_mappings += 1
+    
+    print(f"Mapped {successful_mappings}/{len(charSlotNameJointNameDict)} joints")
     
     characterized = newCharacter.SetCharacterizeOn(True)
     if characterized:
+        print(f"Character '{characterName}' successfully characterized!")
         FBApplication().CurrentCharacter = newCharacter
         return newCharacter
-    return None
+    else:
+        print(f"Characterization failed - not enough joints mapped ({successful_mappings} found)")
+        return None
 
 def create_and_assign_control_rig(character):
     if not character:

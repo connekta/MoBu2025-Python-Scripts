@@ -46,14 +46,14 @@ def is_group_take(take_name):
 
 def get_settings_path():
     """Get the global settings path for window geometry"""
-    base_dir = os.path.expanduser("C:/Users/morri/Documents/MB/CustomPythonSaveData/TakesManager")
+    base_dir = os.path.expanduser("~/Documents/MB/CustomPythonSaveData/TakesManager")
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
     return os.path.join(base_dir, "window_settings.json")
 
 def get_global_settings_path():
     """Get the global settings path for script settings"""
-    base_dir = os.path.expanduser("C:/Users/morri/Documents/MB/CustomPythonSaveData")
+    base_dir = os.path.expanduser("~/Documents/MB/CustomPythonSaveData")
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
     return os.path.join(base_dir, "PythonScriptGlobalSettings.json")
@@ -931,7 +931,7 @@ class TakeHandlerWindow(QMainWindow):
         self.update_take_list()
     
     def _get_config_path(self):
-        base_dir = os.path.expanduser("C:/Users/morri/Documents/MB/CustomPythonSaveData/TakesManager")
+        base_dir = os.path.expanduser("~/Documents/MB/CustomPythonSaveData/TakesManager")
         if not os.path.exists(base_dir):
             os.makedirs(base_dir)
         app = FBApplication()
